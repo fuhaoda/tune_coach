@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from enum import Enum
 
 
 _MAJOR_SCALE_SEMITONES = [0, 2, 4, 5, 7, 9, 11]  # 1..7 in major scale (Do-based)
+_JUST_INTONATION_RATIOS = [1.0, 9 / 8, 5 / 4, 4 / 3, 3 / 2, 5 / 3, 15 / 8]
+
+
+class TuningSystem(str, Enum):
+    EQUAL_TEMPERAMENT = "Equal Temperament"
+    JUST_INTONATION = "Just Intonation"
 
 
 def _dot_above(label: str) -> str:
@@ -42,18 +49,32 @@ class JianpuAxis:
 class JianpuQuantizer:
     do_hz: float
     octave_gap: int = 0
+    tuning: TuningSystem = TuningSystem.EQUAL_TEMPERAMENT
+
+    def degree_hz(self, degree: int, octave: int = 0) -> float | None:
+        if degree < 1 or degree > 7 or self.do_hz <= 0:
+            return None
+        degree_index = degree - 1
+        if self.tuning == TuningSystem.JUST_INTONATION:
+            ratio = _JUST_INTONATION_RATIOS[degree_index]
+            return float(self.do_hz * ratio * (2.0**octave))
+        semitone = _MAJOR_SCALE_SEMITONES[degree_index] + 12 * octave
+        return float(self.do_hz * (2.0 ** (semitone / 12.0)))
 
     def quantize_to_y(self, hz: float) -> int | None:
         if hz <= 0 or self.do_hz <= 0:
             return None
-        semitone = int(round(12.0 * math.log2(hz / self.do_hz)))
         best = None
         best_err = 10**9
         for octave in (-1, 0, 1):
-            base = octave * 12
-            for degree_index, s in enumerate(_MAJOR_SCALE_SEMITONES):
-                candidate = base + s
-                err = abs(semitone - candidate)
+            for degree_index, semitone in enumerate(_MAJOR_SCALE_SEMITONES):
+                if self.tuning == TuningSystem.JUST_INTONATION:
+                    target = self.do_hz * _JUST_INTONATION_RATIOS[degree_index] * (2.0**octave)
+                else:
+                    target = self.do_hz * (2.0 ** ((semitone + 12 * octave) / 12.0))
+                if target <= 0:
+                    continue
+                err = abs(math.log2(hz / target))
                 if err < best_err:
                     best_err = err
                     best = (octave, degree_index)

@@ -39,6 +39,10 @@ class PitchTracker:
         self._buf_fill = 0
         self._hann = np.hanning(self._cfg.window_size).astype(np.float32)
 
+    @property
+    def silence_rms(self) -> float:
+        return float(self._cfg.silence_rms)
+
     def process(self, mono_block: np.ndarray) -> float | None:
         if mono_block.size == 0:
             return None

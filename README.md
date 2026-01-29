@@ -1,14 +1,17 @@
-# Tune Coach (MVP)
+# Tune Coach
 
-A lightweight macOS Python app that captures your vocal pitch in real time and renders a 12‑second rolling **Jianpu** (numbered notation) trace. It supports a 4‑second calibration (sing `1‑2‑3`, auto‑detect three stable notes) and an optional metronome.
+Tune Coach is a lightweight Python desktop app that captures your vocal pitch in real time and renders a rolling **Jianpu** (numbered notation) trace. It focuses on **fast Do calibration**, **clear visual feedback**, and **keyboard-based reference tones** while you sing.
 
 ## Features
 
-- **Calibrate (4s)**: sing `1‑2‑3`; the app finds three stable note segments and treats your **Do as 1**.
-- **Start/Stop**: shows the last **12 seconds** of discrete Jianpu pitch with 1‑second vertical grid lines.
-- **Metronome**: toggle + BPM control (default 96 BPM).
+- **Do calibration (4s)**: sing a single Do within 4 seconds. The app finds the loudest stable 0.5–1.5s window and uses its median Hz as Do.
+- **Manual Do input**: default Do is **130.8 Hz**; you can edit it and press **Enter**.
+- **Tuning systems**: **Just Intonation** (default) or **Equal Temperament**.
+- **Keyboard instrument**: play scale tones using keys `1..7` (Piano/Guitar synth).
+- **Rolling pitch trace**: shows **24 seconds** of Jianpu steps with 1‑second grid lines.
+- **Metronome**: optional BPM click.
 
-> Note: This MVP does not judge “accuracy”; it only visualizes your pitch contour and timing.
+> This app visualizes pitch and timing; it does not grade accuracy.
 
 ## Install
 
@@ -29,23 +32,42 @@ No extra `aubio` is required (this project uses a pure‑numpy pitch tracker to 
 python -m tune_coach
 ```
 
-## How to use
+Or use the CLI entrypoint:
 
-1. Make sure your system input device is the microphone you want (the app uses the system default).
-2. Click **Calibrate** and sing exactly three notes in ~4 seconds: `1 → 2 → 3` (durations can vary).
-3. Click **Start** to see the rolling pitch trace; **Stop** to pause.
-4. Enable **Metronome** if desired and set BPM.
+```bash
+tune-coach
+```
 
-## Pitch display (discrete Jianpu)
+## Quick start
 
-- After calibration, Do is `1`. Incoming pitch is converted to semitone distance (12‑TET) and **snapped to the nearest major‑scale Jianpu** step: `1 2 3 4 5 6 7` (octaves use dots above/below).
-- This makes it easy to see if you reach the next scale step (e.g., moving from `3` toward `4`).
+1. Launch the app and click **Start** to begin listening (default Do = 130.8 Hz).
+2. If you want your own Do:
+   - Click **Calibrate (4s)** and sing a clear **Do** within 4 seconds, or
+   - Type a Do frequency and press **Enter**.
+3. Optional: enable **Metronome** and set BPM.
+4. Use keyboard tones to check pitch or guide practice.
+
+## Keyboard instrument
+
+- `1..7`: play Do–Ti (current octave)
+- `Shift + 1..7`: high octave
+- `Control + 1..7`: low octave
+- Hold key to sustain; release to stop.
+- Works when the app window is focused.
+
+## Pitch display (Jianpu)
+
+- Do is `1`. Incoming pitch is mapped to the nearest major‑scale degree.
+- Octaves are shown by dots above/below the digits.
+- Tuning rules follow the dropdown selection:
+  - **Just Intonation** (natural major scale ratios)
+  - **Equal Temperament** (12‑TET)
 
 ## Troubleshooting
 
-- **`ModuleNotFoundError: No module named 'numpy'`**
-  - Dependencies did not install, or you are not running inside `.venv`.
-  - Reinstall: `python -m pip install -e .`
-  - Verify interpreter: `which python` should point to `.../tune_coach/.venv/bin/python`
-- **Jittery line**: record in a quieter environment, sing louder, or get closer to the mic.
-- **Calibration fails**: you likely did not hold three stable notes; try again with clearer note changes.
+- **No sound / no pitch**: sing louder or closer to the mic; check system input device.
+- **Calibration failed**: sing a clearer, steadier Do; avoid heavy vibrato.
+- **Keyboard instrument silent**: make sure the app window has focus.
+- **Missing deps**:
+  - `python -m pip install -e .`
+  - Verify interpreter points to `.venv`.

@@ -10,15 +10,16 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from tune_coach.audio import AudioInput
-from tune_coach.calibration import calibrate_do_from_stream
-from tune_coach.jianpu import JianpuAxis, JianpuQuantizer
+from tune_coach.calibration import CalibrationError, calibrate_do_from_stream
+from tune_coach.jianpu import JianpuAxis, JianpuQuantizer, TuningSystem
 from tune_coach.metronome import Metronome
 from tune_coach.pitch import PitchTracker, PitchTrackerConfig
+from tune_coach.synth import Instrument, NoteSynth
 
 
 @dataclass(frozen=True)
 class UiConfig:
-    window_seconds: float = 12.0
+    window_seconds: float = 24.0
     tick_seconds: float = 1.0
     left_margin_seconds: float = 0.4
     # Display delay to allow extra smoothing before rendering.
@@ -34,6 +35,19 @@ class UiConfig:
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    _SHIFT_DIGIT_KEYS = {
+        QtCore.Qt.Key.Key_Exclam: 1,
+        QtCore.Qt.Key.Key_At: 2,
+        QtCore.Qt.Key.Key_NumberSign: 3,
+        QtCore.Qt.Key.Key_Dollar: 4,
+        QtCore.Qt.Key.Key_Percent: 5,
+        QtCore.Qt.Key.Key_AsciiCircum: 6,
+        QtCore.Qt.Key.Key_Ampersand: 7,
+    }
+    _NSEVENT_CTRL_MASK = 1 << 18
+    _NSEVENT_CMD_MASK = 1 << 20
+    _DEFAULT_DO_HZ = 130.8
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Tune Coach")
@@ -43,13 +57,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pitch = PitchTracker(PitchTrackerConfig(sample_rate=self._audio.sample_rate))
         self._quantizer: JianpuQuantizer | None = None
         self._metronome = Metronome(sample_rate=self._audio.sample_rate)
+        self._synth = NoteSynth(sample_rate=self._audio.sample_rate)
+        self._held_keys: dict[int, str] = {}
+        self._shift_digit_keys = dict(self._SHIFT_DIGIT_KEYS)
+        for name, degree in (("Key_Circumflex", 6), ("Key_Dead_Circumflex", 6)):
+            key = getattr(QtCore.Qt.Key, name, None)
+            if key is not None:
+                self._shift_digit_keys[key] = degree
 
         self._start_time: float | None = None
         self._times: list[float] = []
         self._ys: list[float] = []
         # Buffer for delayed rendering (time, value).
         self._buffer = deque()
-        self._last_voiced = False
         # Short history for smoothing and stable note decision.
         self._y_smooth = deque(maxlen=self._ui.smooth_window)
         self._y_history = deque(maxlen=self._ui.smooth_window)
@@ -66,6 +86,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(16)  # ~60 FPS UI update
         self._timer.timeout.connect(self._on_tick)
+        self._reset_second_lines()
+        QtWidgets.QApplication.instance().installEventFilter(self)
+        self._apply_do_hz(self._DEFAULT_DO_HZ)
 
     def _build_ui(self) -> None:
         root = QtWidgets.QWidget()
@@ -77,9 +100,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_calibrate = QtWidgets.QPushButton("Calibrate (4s)")
         self.btn_start = QtWidgets.QPushButton("Start")
         self.btn_stop = QtWidgets.QPushButton("Stop")
+        self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(False)
 
         controls.addWidget(self.btn_calibrate)
+        controls.addSpacing(12)
+
+        self.tuning_combo = QtWidgets.QComboBox()
+        self.tuning_combo.addItems(
+            [TuningSystem.EQUAL_TEMPERAMENT.value, TuningSystem.JUST_INTONATION.value]
+        )
+        self.tuning_combo.setCurrentText(TuningSystem.JUST_INTONATION.value)
+        tuning_label = QtWidgets.QLabel("Tuning:")
+        controls.addWidget(tuning_label)
+        controls.addWidget(self.tuning_combo)
+
+        self.instrument_combo = QtWidgets.QComboBox()
+        self.instrument_combo.addItems([Instrument.PIANO.value, Instrument.GUITAR.value])
+        instrument_label = QtWidgets.QLabel("Instrument:")
+        controls.addWidget(instrument_label)
+        controls.addWidget(self.instrument_combo)
+
         controls.addStretch(1)
         controls.addWidget(self.btn_start)
         controls.addWidget(self.btn_stop)
@@ -87,6 +128,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_calibrate.clicked.connect(self._on_calibrate)
         self.btn_start.clicked.connect(self._on_start)
         self.btn_stop.clicked.connect(self._on_stop)
+        self.tuning_combo.currentTextChanged.connect(self._on_tuning_change)
+        self.instrument_combo.currentTextChanged.connect(self._on_instrument_change)
 
         met_layout = QtWidgets.QHBoxLayout()
         layout.addLayout(met_layout)
@@ -104,11 +147,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_bpm.valueChanged.connect(self._on_bpm_change)
 
         status_layout = QtWidgets.QHBoxLayout()
-        self.status = QtWidgets.QLabel("Calibrate first: sing 1-2-3 within 4 seconds.")
-        self.do_label = QtWidgets.QLabel("Do: -- Hz")
+        self.status = QtWidgets.QLabel("Calibrate or enter Do (Hz).")
+        self.status.setStyleSheet("color: #f5f5f5; font-weight: bold;")
+        self.do_label = QtWidgets.QLabel("Do:")
+        self.do_input = QtWidgets.QDoubleSpinBox()
+        self.do_input.setRange(0.0, 2000.0)
+        self.do_input.setDecimals(1)
+        self.do_input.setSingleStep(1.0)
+        self.do_input.setSuffix(" Hz")
+        self.do_input.setSpecialValueText("-- Hz")
+        self.do_input.setValue(0.0)
+        self.do_input.setKeyboardTracking(False)
+        self.do_input.setFixedWidth(140)
+        self.do_input.editingFinished.connect(self._on_do_input)
         status_layout.addWidget(self.status)
         status_layout.addStretch(1)
         status_layout.addWidget(self.do_label)
+        status_layout.addWidget(self.do_input)
         layout.addLayout(status_layout)
 
         pg.setConfigOptions(antialias=True)
@@ -149,12 +204,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._timer.stop()
             self._audio.stop()
             self._metronome.stop()
+            self._synth.stop()
         finally:
             super().closeEvent(event)
 
     @QtCore.Slot()
     def _on_calibrate(self) -> None:
-        self.status.setText("Calibrating... sing 1-2-3 now.")
+        if self._timer.isActive():
+            self._stop_listening()
+        self._set_status("Calibrating... sing Do now.", "info")
         QtWidgets.QApplication.processEvents()
         try:
             do_hz = calibrate_do_from_stream(
@@ -162,37 +220,31 @@ class MainWindow(QtWidgets.QMainWindow):
                 pitch=self._pitch,
                 seconds=4.0,
             )
-        except Exception as exc:  # noqa: BLE001 - user-facing
-            self.status.setText(f"Calibration failed: {exc}")
+        except CalibrationError:
+            self._set_status("Calibration failed", "error")
             self._quantizer = None
+            self._set_do_input(0.0)
+            return
+        except Exception as exc:  # noqa: BLE001 - user-facing
+            self._set_status(f"Calibration failed: {exc}", "error")
+            self._quantizer = None
+            self._set_do_input(0.0)
             return
 
-        self._quantizer = JianpuQuantizer(do_hz=do_hz, octave_gap=0)
-        self.status.setText("Calibrated successfully. Press Start.")
-        self.do_label.setText(f"Do: {do_hz:.1f} Hz")
+        self._apply_do_hz(do_hz)
 
     @QtCore.Slot()
     def _on_start(self) -> None:
         if self._quantizer is None:
-            self.status.setText("Please calibrate first (Calibrate).")
+            self._set_status("Calibrate or enter Do (Hz).", "error")
             return
 
-        self._times.clear()
-        self._ys.clear()
-        self._buffer.clear()
-        self._last_voiced = False
-        self._y_smooth.clear()
-        self._y_history.clear()
-        self._current_y = None
-        self._candidate_y = None
-        self._candidate_count = 0
-        self._last_voiced_time = None
-        self._last_output_nan = False
+        self._reset_trace()
         self._start_time = time.monotonic()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_calibrate.setEnabled(False)
-        self.status.setText("Listening...")
+        self._set_status("Listening...", "info")
 
         self._audio.start()
         self._timer.start()
@@ -201,12 +253,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def _on_stop(self) -> None:
-        self._timer.stop()
-        self._audio.stop()
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
-        self.btn_calibrate.setEnabled(True)
-        self.status.setText("Stopped.")
+        self._stop_listening()
 
     @QtCore.Slot(bool)
     def _on_metronome_toggle(self, enabled: bool) -> None:
@@ -219,6 +266,80 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(int)
     def _on_bpm_change(self, bpm: int) -> None:
         self._metronome.set_bpm(int(bpm))
+
+    def _on_tuning_change(self, text: str) -> None:
+        tuning = self._parse_tuning(text)
+        if self._quantizer is not None:
+            self._quantizer = JianpuQuantizer(
+                do_hz=self._quantizer.do_hz,
+                octave_gap=self._quantizer.octave_gap,
+                tuning=tuning,
+            )
+            self._reset_trace()
+
+    def _on_instrument_change(self, text: str) -> None:
+        self._synth.set_instrument(text)
+
+    def _on_do_input(self) -> None:
+        do_hz = float(self.do_input.value())
+        if do_hz <= 0:
+            return
+        self._apply_do_hz(do_hz)
+
+    def _apply_do_hz(self, do_hz: float) -> None:
+        if self._timer.isActive():
+            self._stop_listening()
+        tuning = self._parse_tuning(self.tuning_combo.currentText())
+        self._quantizer = JianpuQuantizer(do_hz=do_hz, octave_gap=0, tuning=tuning)
+        self._set_do_input(do_hz)
+        self._reset_trace()
+        self._set_status("Ready to listen", "ready")
+        self.btn_start.setEnabled(True)
+
+    def _set_do_input(self, do_hz: float) -> None:
+        self.do_input.blockSignals(True)
+        self.do_input.setValue(float(do_hz))
+        self.do_input.blockSignals(False)
+
+    def _parse_tuning(self, text: str) -> TuningSystem:
+        try:
+            return TuningSystem(text)
+        except ValueError:
+            return TuningSystem.EQUAL_TEMPERAMENT
+
+    def _set_status(self, text: str, kind: str) -> None:
+        if kind == "ready":
+            self.status.setStyleSheet("color: #ff5c5c; font-weight: bold;")
+        elif kind == "error":
+            self.status.setStyleSheet("color: #ff5c5c; font-weight: bold;")
+        elif kind == "info":
+            self.status.setStyleSheet("color: #7fd1ff; font-weight: bold;")
+        else:
+            self.status.setStyleSheet("color: #f5f5f5; font-weight: bold;")
+        self.status.setText(text)
+
+    def _reset_trace(self) -> None:
+        self._times.clear()
+        self._ys.clear()
+        self._buffer.clear()
+        self._y_smooth.clear()
+        self._y_history.clear()
+        self._current_y = None
+        self._candidate_y = None
+        self._candidate_count = 0
+        self._last_voiced_time = None
+        self._last_output_nan = False
+
+    def _stop_listening(self) -> None:
+        self._timer.stop()
+        self._audio.stop()
+        self.btn_start.setEnabled(self._quantizer is not None)
+        self.btn_stop.setEnabled(False)
+        self.btn_calibrate.setEnabled(True)
+        if self._quantizer is None:
+            self._set_status("Calibrate or enter Do (Hz).", "error")
+        else:
+            self._set_status("Ready to listen", "ready")
 
     def _reset_second_lines(self) -> None:
         for line in self._second_lines:
@@ -256,7 +377,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     else:
                         y_sm = y
                     self._y_history.append(y_sm)
-                    self._last_voiced = True
                     self._last_voiced_time = t
                 else:
                     self._y_smooth.clear()
@@ -292,7 +412,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_y = None
             self._candidate_y = None
             self._candidate_count = 0
-            self._last_voiced = False
             output_y = None
 
         # Buffer output for delayed display and explicit silence gaps.
@@ -330,10 +449,125 @@ class MainWindow(QtWidgets.QMainWindow):
             self._curve.setData([], [])
             self._scatter.setData([], [])
 
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if event.type() == QtCore.QEvent.Type.ApplicationDeactivate:
+            self._release_all_notes()
+        elif event.type() == QtCore.QEvent.Type.WindowDeactivate:
+            self._release_all_notes()
+        if event.type() == QtCore.QEvent.Type.KeyPress:
+            if self._handle_key_press(event):
+                return True
+        elif event.type() == QtCore.QEvent.Type.KeyRelease:
+            if self._handle_key_release(event):
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if self._handle_key_press(event):
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if self._handle_key_release(event):
+            return
+        super().keyReleaseEvent(event)
+
+    def _handle_key_press(self, event) -> bool:
+        if event.isAutoRepeat() or self._quantizer is None:
+            return False
+        focus = QtWidgets.QApplication.focusWidget()
+        if isinstance(focus, (QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox)):
+            return False
+        degree, octave = self._parse_key_event(event)
+        if degree is None:
+            return False
+        key_id = self._key_id(event)
+        if key_id in self._held_keys:
+            return True
+        freq = self._quantizer.degree_hz(degree, octave=octave)
+        if freq is None:
+            return False
+        self._synth.start()
+        note_key = f"{degree}:{octave}"
+        self._held_keys[key_id] = note_key
+        self._synth.note_on(note_key, freq)
+        return True
+
+    def _handle_key_release(self, event) -> bool:
+        if event.isAutoRepeat():
+            return False
+        key_id = self._key_id(event)
+        note_key = self._held_keys.pop(key_id, None)
+        if note_key is None:
+            alt_id = ("qt", int(event.key()))
+            note_key = self._held_keys.pop(alt_id, None)
+        if note_key is None:
+            return False
+        self._synth.note_off(note_key)
+        return True
+
+    def _parse_key_event(self, event) -> tuple[int | None, int]:
+        text = event.text()
+        symbol_map = {"!": 1, "@": 2, "#": 3, "$": 4, "%": 5, "^": 6, "&": 7}
+        if text in symbol_map:
+            degree = symbol_map[text]
+        elif text and text.isdigit():
+            degree = int(text)
+            if degree < 1 or degree > 7:
+                return None, 0
+        else:
+            key = event.key()
+            if QtCore.Qt.Key.Key_1 <= key <= QtCore.Qt.Key.Key_7:
+                degree = int(key - QtCore.Qt.Key.Key_0)
+            elif key in self._shift_digit_keys:
+                degree = int(self._shift_digit_keys[key])
+            else:
+                native = int(event.nativeVirtualKey())
+                mac_map = {18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7}
+                if sys.platform == "darwin" and native in mac_map:
+                    degree = mac_map[native]
+                else:
+                    return None, 0
+        modifiers = event.modifiers()
+        if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            octave = 1
+        elif self._control_modifier_active(event):
+            octave = -1
+        else:
+            octave = 0
+        return degree, octave
+
+    def _key_id(self, event) -> tuple[str, int]:
+        native = int(event.nativeVirtualKey())
+        if native:
+            return ("native", native)
+        return ("qt", int(event.key()))
+
+    def _release_all_notes(self) -> None:
+        if not self._held_keys:
+            return
+        for note_key in list(self._held_keys.values()):
+            self._synth.note_off(note_key)
+        self._held_keys.clear()
+
+
+    def _control_modifier_active(self, event) -> bool:
+        modifiers = event.modifiers()
+        if (
+            modifiers & QtCore.Qt.KeyboardModifier.ControlModifier
+            and not (modifiers & QtCore.Qt.KeyboardModifier.MetaModifier)
+        ):
+            return True
+        if sys.platform == "darwin":
+            native = int(event.nativeModifiers())
+            if (native & self._NSEVENT_CTRL_MASK) and not (native & self._NSEVENT_CMD_MASK):
+                return True
+        return False
+
 
 def main() -> None:
     app = QtWidgets.QApplication(sys.argv)
     win = MainWindow()
-    win.resize(900, 650)
+    win.resize(1800, 650)
     win.show()
     sys.exit(app.exec())
