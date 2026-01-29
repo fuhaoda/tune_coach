@@ -88,6 +88,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer.timeout.connect(self._on_tick)
         self._reset_second_lines()
         QtWidgets.QApplication.instance().installEventFilter(self)
+        self._synth.set_instrument(self.instrument_combo.currentText())
         self._apply_do_hz(self._DEFAULT_DO_HZ)
         self.plot.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.plot.setFocus()
