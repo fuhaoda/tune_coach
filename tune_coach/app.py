@@ -89,6 +89,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reset_second_lines()
         QtWidgets.QApplication.instance().installEventFilter(self)
         self._apply_do_hz(self._DEFAULT_DO_HZ)
+        self.plot.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
+        self.plot.setFocus()
 
     def _build_ui(self) -> None:
         root = QtWidgets.QWidget()
@@ -117,6 +119,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.instrument_combo = QtWidgets.QComboBox()
         self.instrument_combo.addItems([Instrument.PIANO.value, Instrument.GUITAR.value])
+        self.instrument_combo.setCurrentText(Instrument.GUITAR.value)
         instrument_label = QtWidgets.QLabel("Instrument:")
         controls.addWidget(instrument_label)
         controls.addWidget(self.instrument_combo)
@@ -139,6 +142,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_bpm.setRange(50, 160)
         self.spin_bpm.setValue(96)
         self.spin_bpm.setSuffix(" BPM")
+        self.spin_bpm.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
         met_layout.addWidget(self.chk_metronome)
         met_layout.addWidget(self.spin_bpm)
         met_layout.addStretch(1)
@@ -159,6 +163,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.do_input.setValue(0.0)
         self.do_input.setKeyboardTracking(False)
         self.do_input.setFixedWidth(140)
+        self.do_input.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
         self.do_input.editingFinished.connect(self._on_do_input)
         status_layout.addWidget(self.status)
         status_layout.addStretch(1)
