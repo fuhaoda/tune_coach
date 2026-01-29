@@ -7,7 +7,7 @@ Tune Coach is a lightweight Python desktop app that captures your vocal pitch in
 - **Do calibration (4s)**: sing a single Do within 4 seconds. The app finds the loudest stable 0.5–1.5s window and uses its median Hz as Do.
 - **Manual Do input**: default Do is **130.8 Hz**; you can edit it and press **Enter**.
 - **Tuning systems**: **Just Intonation** (default) or **Equal Temperament**.
-- **Keyboard instrument**: play scale tones using keys `1..7` (Piano/Guitar synth).
+- **Keyboard instrument**: play scale tones using keys `1..7` (default **Guitar**, switchable to Piano).
 - **Rolling pitch trace**: shows **24 seconds** of Jianpu steps with 1‑second grid lines.
 - **Metronome**: optional BPM click.
 
@@ -45,7 +45,7 @@ tune-coach
    - Click **Calibrate (4s)** and sing a clear **Do** within 4 seconds, or
    - Type a Do frequency and press **Enter**.
 3. Optional: enable **Metronome** and set BPM.
-4. Use keyboard tones to check pitch or guide practice.
+4. Use keyboard tones to check pitch or guide practice (default instrument is Guitar).
 
 ## Keyboard instrument
 
