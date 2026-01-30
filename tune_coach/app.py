@@ -29,6 +29,7 @@ class UiConfig:
     delay_seconds: float = 0.25
     # Median window used for note stability detection.
     smooth_window: int = 11
+    cent_smooth_window: int = 3
     # Minimum count of the same note to accept it as stable.
     stable_min_count: int = 7
     # Extra confirmations required to switch to a new note.
@@ -81,11 +82,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._start_time: float | None = None
         self._times: list[float] = []
         self._ys: list[float] = []
+        self._cent_times: list[float] = []
+        self._cent_ys: list[float] = []
         # Buffer for delayed rendering (time, value).
         self._buffer = deque()
+        self._cent_buffer = deque()
         # Short history for smoothing and stable note decision.
         self._y_smooth = deque(maxlen=self._ui.smooth_window)
         self._y_history = deque(maxlen=self._ui.smooth_window)
+        self._cent_smooth = deque(maxlen=self._ui.cent_smooth_window)
         # Current stable note and candidate note for switching.
         self._current_y: int | None = None
         self._candidate_y: int | None = None
@@ -93,6 +98,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # Track last voiced time to detect silence gaps.
         self._last_voiced_time: float | None = None
         self._last_output_nan = False
+        self._cent_last_output_nan = False
+        self._last_cent_value: float | None = None
+        self._last_cent_time: float | None = None
+        self._transition_start: float | None = None
+        self._transition_target: int | None = None
 
         self._build_ui()
         self.status_signal.connect(self._set_status)
@@ -161,10 +171,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fix_spinbox_style(self.spin_bpm)
         met_layout.addWidget(self.chk_metronome)
         met_layout.addWidget(self.spin_bpm)
+        self.chk_cent_curve = QtWidgets.QCheckBox("Cent Curve")
+        self.chk_cent_curve.setChecked(False)
+        met_layout.addSpacing(12)
+        met_layout.addWidget(self.chk_cent_curve)
         met_layout.addStretch(1)
 
         self.chk_metronome.toggled.connect(self._on_metronome_toggle)
         self.spin_bpm.valueChanged.connect(self._on_bpm_change)
+        self.chk_cent_curve.toggled.connect(self._on_cent_curve_toggle)
 
         self.btn_record = QtWidgets.QPushButton("Recording")
         self.btn_record.setEnabled(False)
@@ -240,6 +255,10 @@ class MainWindow(QtWidgets.QMainWindow):
             pen=pg.mkPen(color=(30, 90, 160), width=1),
         )
         self.plot.addItem(self._scatter)
+        self._cent_curve = self.plot.plot(
+            [], [], pen=pg.mkPen(color=(255, 170, 60), width=2), connect="finite"
+        )
+        self._cent_curve.setVisible(False)
 
         self._second_lines: list[pg.InfiniteLine] = []
         self.setCentralWidget(root)
@@ -314,6 +333,21 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(int)
     def _on_bpm_change(self, bpm: int) -> None:
         self._metronome.set_bpm(int(bpm))
+
+    @QtCore.Slot(bool)
+    def _on_cent_curve_toggle(self, enabled: bool) -> None:
+        self._cent_curve.setVisible(bool(enabled))
+        self._cent_times.clear()
+        self._cent_ys.clear()
+        self._cent_buffer.clear()
+        self._cent_smooth.clear()
+        self._cent_last_output_nan = False
+        self._last_cent_value = None
+        self._last_cent_time = None
+        self._transition_start = None
+        self._transition_target = None
+        if not enabled:
+            self._cent_curve.setData([], [])
 
     def _on_record_start(self) -> None:
         if not self._timer.isActive():
@@ -552,14 +586,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _reset_trace(self) -> None:
         self._times.clear()
         self._ys.clear()
+        self._cent_times.clear()
+        self._cent_ys.clear()
         self._buffer.clear()
+        self._cent_buffer.clear()
         self._y_smooth.clear()
         self._y_history.clear()
+        self._cent_smooth.clear()
         self._current_y = None
         self._candidate_y = None
         self._candidate_count = 0
         self._last_voiced_time = None
         self._last_output_nan = False
+        self._cent_last_output_nan = False
+        self._last_cent_value = None
+        self._last_cent_time = None
+        self._transition_start = None
+        self._transition_target = None
 
     def _stop_listening(self) -> None:
         self._timer.stop()
@@ -594,6 +637,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.plot.setXRange(-self._ui.window_seconds - self._ui.left_margin_seconds, 0.0)
 
+    def _backfill_buffer(self, start_time: float, y_value: int) -> None:
+        if not self._buffer:
+            return
+        updated = deque()
+        for bt, by in self._buffer:
+            if bt >= start_time:
+                updated.append((bt, float(y_value)))
+            else:
+                updated.append((bt, by))
+        self._buffer = updated
+
     def _on_tick(self) -> None:
         if self._start_time is None or self._quantizer is None:
             return
@@ -605,6 +659,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._recording_limit_hit = False
             self._stop_recording()
 
+        pitch_hz: float | None = None
+        observed_y: int | None = None
         frame = self._audio.read_latest()
         if frame is not None:
             pitch_hz = self._pitch.process(frame)
@@ -616,12 +672,40 @@ class MainWindow(QtWidgets.QMainWindow):
                         y_sm = int(np.median(np.array(self._y_smooth, dtype=np.float32)))
                     else:
                         y_sm = y
+                    observed_y = y_sm
                     self._y_history.append(y_sm)
                     self._last_voiced_time = t
                 else:
                     self._y_smooth.clear()
             else:
                 self._y_smooth.clear()
+                if self.chk_cent_curve.isChecked():
+                    self._cent_smooth.clear()
+
+        if observed_y is not None:
+            if self._current_y is None:
+                if self._transition_target != observed_y:
+                    self._transition_start = t
+                    self._transition_target = observed_y
+            elif observed_y != self._current_y:
+                if self._transition_target != observed_y:
+                    self._transition_start = t
+                    self._transition_target = observed_y
+            else:
+                self._transition_start = None
+                self._transition_target = None
+
+        cent_y: float | None = None
+        if self.chk_cent_curve.isChecked() and pitch_hz is not None:
+            cent_y = self._quantizer.continuous_y(pitch_hz)
+            if cent_y is not None:
+                self._cent_smooth.append(cent_y)
+                if len(self._cent_smooth) >= 3:
+                    cent_y = float(np.median(np.array(self._cent_smooth, dtype=np.float32)))
+                self._last_cent_value = cent_y
+                self._last_cent_time = t
+            else:
+                self._cent_smooth.clear()
 
         # Decide output note based on stable trend within the recent window.
         output_y: float | None = None
@@ -633,6 +717,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 if stable_count >= self._ui.stable_min_count:
                     if self._current_y is None:
                         self._current_y = stable_y
+                        start_time = (
+                            self._transition_start
+                            if self._transition_target == stable_y
+                            else None
+                        )
+                        if start_time is not None:
+                            self._backfill_buffer(start_time, stable_y)
                     elif stable_y != self._current_y:
                         if self._candidate_y == stable_y:
                             self._candidate_count += 1
@@ -643,6 +734,15 @@ class MainWindow(QtWidgets.QMainWindow):
                             self._current_y = stable_y
                             self._candidate_y = None
                             self._candidate_count = 0
+                            start_time = (
+                                self._transition_start
+                                if self._transition_target == stable_y
+                                else None
+                            )
+                            if start_time is not None:
+                                self._backfill_buffer(start_time, stable_y)
+                            self._transition_start = None
+                            self._transition_target = None
                     else:
                         self._candidate_y = None
                         self._candidate_count = 0
@@ -663,18 +763,38 @@ class MainWindow(QtWidgets.QMainWindow):
             self._buffer.append((t, output_y))
             self._last_output_nan = False
 
+        if self.chk_cent_curve.isChecked():
+            cent_output: float | None = cent_y
+            if cent_output is None and self._last_cent_time is not None:
+                if (t - self._last_cent_time) <= self._ui.silence_timeout:
+                    cent_output = self._last_cent_value
+            if cent_output is None:
+                if not self._cent_last_output_nan:
+                    self._cent_buffer.append((t, float("nan")))
+                    self._cent_last_output_nan = True
+            else:
+                self._cent_buffer.append((t, float(cent_output)))
+                self._cent_last_output_nan = False
+
         # release buffered points with a small delay for extra smoothness
         release_before = t - self._ui.delay_seconds
         while self._buffer and self._buffer[0][0] <= release_before:
             bt, by = self._buffer.popleft()
             self._times.append(bt)
             self._ys.append(by)
+        while self._cent_buffer and self._cent_buffer[0][0] <= release_before:
+            ct, cy = self._cent_buffer.popleft()
+            self._cent_times.append(ct)
+            self._cent_ys.append(cy)
 
         # keep only last window
         min_t = t - self._ui.window_seconds
         while self._times and self._times[0] < min_t:
             self._times.pop(0)
             self._ys.pop(0)
+        while self._cent_times and self._cent_times[0] < min_t:
+            self._cent_times.pop(0)
+            self._cent_ys.pop(0)
 
         if self._times:
             x = np.array(self._times, dtype=np.float32) - t  # shift so "now" is x=0
@@ -688,6 +808,12 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._curve.setData([], [])
             self._scatter.setData([], [])
+        if self._cent_curve.isVisible() and self._cent_times:
+            cx = np.array(self._cent_times, dtype=np.float32) - t
+            cy = np.array(self._cent_ys, dtype=np.float32)
+            self._cent_curve.setData(cx, cy)
+        elif self._cent_curve.isVisible():
+            self._cent_curve.setData([], [])
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
         if event.type() == QtCore.QEvent.Type.ApplicationDeactivate:

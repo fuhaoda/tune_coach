@@ -10,6 +10,7 @@ Tune Coach is a lightweight Python desktop app that captures your vocal pitch in
 - **Keyboard instrument**: play scale tones using keys `1..7` (default **Guitar**, switchable to Piano).
 - **Record + Shift + Play**: record up to 10 seconds, then play back your voice shifted by ±5 scale steps.
 - **Rolling pitch trace**: shows **24 seconds** of Jianpu steps with 1‑second grid lines.
+- **Cent curve overlay**: optional continuous pitch curve aligned to the Jianpu axis.
 - **Metronome**: optional BPM click.
 
 > This app visualizes pitch and timing; it does not grade accuracy.
@@ -49,8 +50,9 @@ tune-coach
    - Click **Calibrate (4s)** and sing a clear **Do** within 4 seconds, or
    - Type a Do frequency and press **Enter**.
 3. Optional: enable **Metronome** and set BPM.
-4. Use keyboard tones to check pitch or guide practice (default instrument is Guitar).
-5. To record and shift your voice:
+4. Optional: enable **Cent Curve** to see your continuous pitch track.
+5. Use keyboard tones to check pitch or guide practice (default instrument is Guitar).
+6. To record and shift your voice:
    - Click **Start** (record/play only works while listening).
    - Press and hold **Recording**, sing, then release.
    - Choose **Shift -5..+5 steps**.
@@ -78,6 +80,7 @@ tune-coach
 - Tuning rules follow the dropdown selection:
   - **Just Intonation** (natural major scale ratios)
   - **Equal Temperament** (12‑TET)
+- **Cent Curve** (optional) shows the continuous pitch path aligned to the same Jianpu axis and tuning.
 
 ## Troubleshooting
 

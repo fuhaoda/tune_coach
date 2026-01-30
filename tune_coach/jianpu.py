@@ -7,6 +7,8 @@ from enum import Enum
 
 _MAJOR_SCALE_SEMITONES = [0, 2, 4, 5, 7, 9, 11]  # 1..7 in major scale (Do-based)
 _JUST_INTONATION_RATIOS = [1.0, 9 / 8, 5 / 4, 4 / 3, 3 / 2, 5 / 3, 15 / 8]
+_JUST_INTONATION_CENTS = [1200.0 * math.log2(ratio) for ratio in _JUST_INTONATION_RATIOS]
+_EQUAL_TEMPERAMENT_CENTS = [float(semitone * 100) for semitone in _MAJOR_SCALE_SEMITONES]
 
 
 class TuningSystem(str, Enum):
@@ -106,3 +108,35 @@ class JianpuQuantizer:
                     best_err = err
                     best = (degree_index + 1, octave)
         return best
+
+    def continuous_y(self, hz: float) -> float | None:
+        if hz <= 0 or self.do_hz <= 0:
+            return None
+        cents_total = 1200.0 * math.log2(hz / self.do_hz)
+        octave = math.floor(cents_total / 1200.0)
+        if octave < -1 or octave > 1:
+            return None
+        cents_in_oct = cents_total - (octave * 1200.0)
+        degree_cents = (
+            _JUST_INTONATION_CENTS
+            if self.tuning == TuningSystem.JUST_INTONATION
+            else _EQUAL_TEMPERAMENT_CENTS
+        )
+        idx = 0
+        for i in range(len(degree_cents) - 1):
+            if cents_in_oct < degree_cents[i + 1]:
+                idx = i
+                break
+        else:
+            idx = len(degree_cents) - 1
+        start = degree_cents[idx]
+        end = 1200.0 if idx == len(degree_cents) - 1 else degree_cents[idx + 1]
+        span = max(1.0, end - start)
+        frac = (cents_in_oct - start) / span
+        frac = float(min(1.0, max(0.0, frac)))
+        octave_gap = int(max(0, self.octave_gap))
+        y = (octave + 1) * (7 + octave_gap) + idx + frac
+        max_y = (7 * 3 - 1) + (octave_gap * 2)
+        if y < 0:
+            return None
+        return float(min(max_y, y))
