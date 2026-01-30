@@ -13,6 +13,9 @@ dependencies = [
   "sounddevice>=0.4.6",
   "PySide6>=6.6",
   "pyqtgraph>=0.13.3",
+  "librosa>=0.10.2",
+  "soundfile>=0.12.1",
+  "pyworld>=0.3.3",
 ]
 
 [project.scripts]

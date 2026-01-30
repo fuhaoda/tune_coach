@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from typing import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -20,10 +21,15 @@ class AudioInput:
         self._lock = threading.Lock()
         self._latest: np.ndarray | None = None
         self._stream: sd.InputStream | None = None
+        self._tap: Callable[[np.ndarray], None] | None = None
 
     @property
     def sample_rate(self) -> int:
         return self._cfg.sample_rate
+
+    @property
+    def block_size(self) -> int:
+        return self._cfg.block_size
 
     @property
     def is_running(self) -> bool:
@@ -40,6 +46,9 @@ class AudioInput:
             mono = np.asarray(indata[:, 0], dtype=np.float32).copy()
             with self._lock:
                 self._latest = mono
+                tap = self._tap
+            if tap is not None:
+                tap(mono)
 
         self._stream = sd.InputStream(
             samplerate=self._cfg.sample_rate,
@@ -64,3 +73,7 @@ class AudioInput:
             if self._latest is None:
                 return None
             return self._latest.copy()
+
+    def set_tap(self, tap: Callable[[np.ndarray], None] | None) -> None:
+        with self._lock:
+            self._tap = tap

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from collections import deque
@@ -8,6 +9,7 @@ from collections import deque
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
+import sounddevice as sd
 
 from tune_coach.audio import AudioInput
 from tune_coach.calibration import CalibrationError, calibrate_do_from_stream
@@ -15,6 +17,7 @@ from tune_coach.jianpu import JianpuAxis, JianpuQuantizer, TuningSystem
 from tune_coach.metronome import Metronome
 from tune_coach.pitch import PitchTracker, PitchTrackerConfig
 from tune_coach.synth import Instrument, NoteSynth
+from tune_coach.voice_shift import pitch_shift_formant
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,7 @@ class UiConfig:
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    status_signal = QtCore.Signal(str, str)
     _SHIFT_DIGIT_KEYS = {
         QtCore.Qt.Key.Key_Exclam: 1,
         QtCore.Qt.Key.Key_At: 2,
@@ -59,6 +63,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._metronome = Metronome(sample_rate=self._audio.sample_rate)
         self._synth = NoteSynth(sample_rate=self._audio.sample_rate)
         self._held_keys: dict[int, str] = {}
+        self._recording = False
+        self._recording_frames: list[np.ndarray] = []
+        self._recording_samples = 0
+        self._recording_limit_samples = int(10 * self._audio.sample_rate)
+        self._recording_limit_hit = False
+        self._recording_lock = threading.Lock()
+        self._recorded_audio: np.ndarray | None = None
+        self._play_thread: threading.Thread | None = None
+        self._play_lock = threading.Lock()
         self._shift_digit_keys = dict(self._SHIFT_DIGIT_KEYS)
         for name, degree in (("Key_Circumflex", 6), ("Key_Dead_Circumflex", 6)):
             key = getattr(QtCore.Qt.Key, name, None)
@@ -82,6 +95,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_output_nan = False
 
         self._build_ui()
+        self.status_signal.connect(self._set_status)
 
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(16)  # ~60 FPS UI update
@@ -144,12 +158,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_bpm.setValue(96)
         self.spin_bpm.setSuffix(" BPM")
         self.spin_bpm.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+        self._fix_spinbox_style(self.spin_bpm)
         met_layout.addWidget(self.chk_metronome)
         met_layout.addWidget(self.spin_bpm)
         met_layout.addStretch(1)
 
         self.chk_metronome.toggled.connect(self._on_metronome_toggle)
         self.spin_bpm.valueChanged.connect(self._on_bpm_change)
+
+        self.btn_record = QtWidgets.QPushButton("Recording")
+        self.btn_record.setEnabled(False)
+        self.btn_record.setCheckable(False)
+        self.spin_shift = QtWidgets.QSpinBox()
+        self.spin_shift.setRange(-5, 5)
+        self.spin_shift.setValue(0)
+        self.spin_shift.setPrefix("Shift ")
+        self.spin_shift.setSuffix(" steps")
+        self.spin_shift.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+        self._fix_spinbox_style(self.spin_shift)
+        self.btn_play = QtWidgets.QPushButton("Play")
+        self.btn_play.setEnabled(False)
+
+        met_layout.addStretch(1)
+        met_layout.addWidget(self.btn_record)
+        met_layout.addSpacing(12)
+        met_layout.addWidget(self.spin_shift)
+        met_layout.addWidget(self.btn_play)
+
+        self.btn_record.pressed.connect(self._on_record_start)
+        self.btn_record.released.connect(self._on_record_stop)
+        self.btn_play.clicked.connect(self._on_play)
 
         status_layout = QtWidgets.QHBoxLayout()
         self.status = QtWidgets.QLabel("Calibrate or enter Do (Hz).")
@@ -165,6 +203,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.do_input.setKeyboardTracking(False)
         self.do_input.setFixedWidth(140)
         self.do_input.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+        self._fix_spinbox_style(self.do_input)
         self.do_input.editingFinished.connect(self._on_do_input)
         status_layout.addWidget(self.status)
         status_layout.addStretch(1)
@@ -211,6 +250,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._audio.stop()
             self._metronome.stop()
             self._synth.stop()
+            self._stop_playback()
         finally:
             super().closeEvent(event)
 
@@ -250,6 +290,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_calibrate.setEnabled(False)
+        self.btn_record.setEnabled(True)
+        self.btn_play.setEnabled(self._recorded_audio is not None)
         self._set_status("Listening...", "info")
 
         self._audio.start()
@@ -272,6 +314,182 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(int)
     def _on_bpm_change(self, bpm: int) -> None:
         self._metronome.set_bpm(int(bpm))
+
+    def _on_record_start(self) -> None:
+        if not self._timer.isActive():
+            self._set_status("Press Start before recording.", "error")
+            return
+        if self._recording:
+            return
+        with self._recording_lock:
+            self._recording_frames.clear()
+            self._recording_samples = 0
+        self._recording_limit_hit = False
+        self._recording = True
+        self._audio.set_tap(self._record_tap)
+        self._set_status("Recording...", "info")
+
+    def _on_record_stop(self) -> None:
+        if self._recording:
+            self._stop_recording()
+
+    def _stop_recording(self, *, cancel: bool = False) -> None:
+        self._audio.set_tap(None)
+        if not self._recording and not cancel:
+            return
+        self._recording = False
+        if cancel:
+            with self._recording_lock:
+                self._recording_frames.clear()
+                self._recording_samples = 0
+            self._recorded_audio = None
+            return
+        with self._recording_lock:
+            frames = list(self._recording_frames)
+            self._recording_frames.clear()
+            self._recording_samples = 0
+        if not frames:
+            self._recorded_audio = None
+            self._set_status("Listening...", "info")
+            self.btn_play.setEnabled(False)
+            return
+        self._recorded_audio = np.concatenate(frames).astype(np.float32, copy=False)
+        self.btn_play.setEnabled(True)
+        self._set_status("Listening...", "info")
+
+    def _record_tap(self, frame: np.ndarray) -> None:
+        if not self._recording:
+            return
+        with self._recording_lock:
+            self._recording_frames.append(frame.copy())
+            self._recording_samples += frame.size
+            if self._recording_samples >= self._recording_limit_samples:
+                self._recording_limit_hit = True
+
+    def _on_play(self) -> None:
+        if not self._timer.isActive():
+            self._set_status("Press Start before playback.", "error")
+            return
+        if self._recorded_audio is None:
+            self._set_status("Record something first.", "error")
+            return
+        with self._play_lock:
+            if self._play_thread is not None and self._play_thread.is_alive():
+                return
+            self._set_status("Processing...", "info")
+            audio = self._recorded_audio.copy()
+            steps = int(self.spin_shift.value())
+            self._play_thread = threading.Thread(
+                target=self._render_and_play, args=(audio, steps), daemon=True
+            )
+            self._play_thread.start()
+
+    def _render_and_play(self, audio: np.ndarray, steps: int) -> None:
+        try:
+            start = time.monotonic()
+            ratio = self._degree_shift_ratio(audio, steps)
+            shifted = pitch_shift_formant(audio, self._audio.sample_rate, ratio)
+            if shifted.size == 0:
+                self._set_status_async("Playback failed (empty audio).", "error")
+                return
+            shifted = self._match_rms(shifted, audio, max_gain=6.0)
+            shifted = self._apply_fade(shifted, ms=8.0)
+            elapsed = time.monotonic() - start
+            if elapsed > 8.0:
+                self._set_status_async(f"Processing slow ({elapsed:.1f}s).", "error")
+            self._set_status_async("Playing...", "info")
+            sd.play(shifted, samplerate=self._audio.sample_rate, blocking=True)
+            self._set_status_async("Listening...", "info")
+        except Exception as exc:  # noqa: BLE001 - user-facing
+            self._set_status_async(f"Playback failed: {exc}", "error")
+
+    def _match_rms(self, audio: np.ndarray, ref: np.ndarray, *, max_gain: float) -> np.ndarray:
+        if audio.size == 0 or ref.size == 0:
+            return audio
+        rms_audio = self._percentile_rms(audio, 90.0)
+        rms_ref = self._percentile_rms(ref, 90.0)
+        if rms_audio < 1e-6 or rms_ref < 1e-6:
+            return audio
+        gain = rms_ref / rms_audio
+        gain = float(max(0.3, min(max_gain, gain)))
+        out = audio * gain
+        peak = float(np.max(np.abs(out))) if out.size else 0.0
+        if peak > 0.99:
+            out = out / peak * 0.99
+        return out
+
+    def _percentile_rms(self, audio: np.ndarray, percentile: float) -> float:
+        if audio.size == 0:
+            return 0.0
+        hop = max(256, self._audio.block_size)
+        window = max(hop, 1024)
+        x = audio.astype(np.float32, copy=False)
+        rms_list: list[float] = []
+        for i in range(0, len(x) - window + 1, hop):
+            frame = x[i : i + window]
+            rms = float(np.sqrt(np.mean(np.square(frame))))
+            rms_list.append(rms)
+        if not rms_list:
+            return float(np.sqrt(np.mean(np.square(x))))
+        return float(np.percentile(np.array(rms_list, dtype=np.float32), percentile))
+
+    def _apply_fade(self, audio: np.ndarray, *, ms: float) -> np.ndarray:
+        if audio.size == 0:
+            return audio
+        n = int((ms / 1000.0) * self._audio.sample_rate)
+        n = max(1, min(n, audio.size // 2))
+        out = audio.copy()
+        fade_in = np.linspace(0.0, 1.0, n, endpoint=False, dtype=np.float32)
+        fade_out = np.linspace(1.0, 0.0, n, endpoint=False, dtype=np.float32)
+        out[:n] *= fade_in
+        out[-n:] *= fade_out
+        return out
+
+    def _set_status_async(self, text: str, kind: str) -> None:
+        self.status_signal.emit(text, kind)
+
+    def _estimate_recording_pitch(self, audio: np.ndarray) -> float | None:
+        tracker = PitchTracker(PitchTrackerConfig(sample_rate=self._audio.sample_rate))
+        hop = self._audio.block_size
+        hz_list: list[float] = []
+        for i in range(0, len(audio), hop):
+            frame = audio[i : i + hop]
+            if frame.size == 0:
+                continue
+            hz = tracker.process(frame)
+            if hz is not None:
+                hz_list.append(hz)
+        if not hz_list:
+            return None
+        return float(np.median(np.array(hz_list, dtype=np.float32)))
+
+    def _degree_shift_ratio(self, audio: np.ndarray, steps: int) -> float:
+        if steps == 0:
+            return 1.0
+        quantizer = self._quantizer
+        if quantizer is None:
+            quantizer = JianpuQuantizer(do_hz=self._DEFAULT_DO_HZ, tuning=TuningSystem.JUST_INTONATION)
+        base_hz = self._estimate_recording_pitch(audio)
+        if base_hz is None or base_hz <= 0:
+            return float(2.0 ** ((2 * steps) / 12.0))
+        nearest = quantizer.nearest_degree(base_hz)
+        if nearest is None:
+            return float(2.0 ** ((2 * steps) / 12.0))
+        degree, octave = nearest
+        new_degree, octave_shift = self._shift_degree(degree, steps)
+        target = quantizer.degree_hz(new_degree, octave=octave + octave_shift)
+        if target is None:
+            return float(2.0 ** ((2 * steps) / 12.0))
+        return float(target / base_hz)
+
+    def _shift_degree(self, degree: int, steps: int) -> tuple[int, int]:
+        idx = (degree - 1) + steps
+        octave_shift = idx // 7
+        new_idx = idx % 7
+        return int(new_idx + 1), int(octave_shift)
+
+    def _stop_playback(self) -> None:
+        sd.stop()
 
     def _on_tuning_change(self, text: str) -> None:
         tuning = self._parse_tuning(text)
@@ -324,6 +542,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status.setStyleSheet("color: #f5f5f5; font-weight: bold;")
         self.status.setText(text)
 
+    def _fix_spinbox_style(self, widget: QtWidgets.QAbstractSpinBox) -> None:
+        if sys.platform != "darwin":
+            return
+        style = QtWidgets.QStyleFactory.create("Fusion")
+        if style is not None:
+            widget.setStyle(style)
+
     def _reset_trace(self) -> None:
         self._times.clear()
         self._ys.clear()
@@ -339,9 +564,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _stop_listening(self) -> None:
         self._timer.stop()
         self._audio.stop()
+        self._audio.set_tap(None)
+        self._stop_recording(cancel=True)
+        self._stop_playback()
         self.btn_start.setEnabled(self._quantizer is not None)
         self.btn_stop.setEnabled(False)
         self.btn_calibrate.setEnabled(True)
+        self.btn_record.setEnabled(False)
+        self.btn_play.setEnabled(False)
         if self._quantizer is None:
             self._set_status("Calibrate or enter Do (Hz).", "error")
         else:
@@ -370,6 +600,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         now = time.monotonic()
         t = now - self._start_time
+
+        if self._recording_limit_hit:
+            self._recording_limit_hit = False
+            self._stop_recording()
 
         frame = self._audio.read_latest()
         if frame is not None:

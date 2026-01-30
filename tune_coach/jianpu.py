@@ -90,3 +90,19 @@ class JianpuQuantizer:
         if y < 0 or y > max_y:
             return None
         return int(y)
+
+    def nearest_degree(self, hz: float) -> tuple[int, int] | None:
+        if hz <= 0 or self.do_hz <= 0:
+            return None
+        semitone = 12.0 * math.log2(hz / self.do_hz)
+        best = None
+        best_err = 10**9
+        for octave in range(-3, 4):
+            base = octave * 12
+            for degree_index, s in enumerate(_MAJOR_SCALE_SEMITONES):
+                candidate = base + s
+                err = abs(semitone - candidate)
+                if err < best_err:
+                    best_err = err
+                    best = (degree_index + 1, octave)
+        return best

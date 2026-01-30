@@ -1,6 +1,6 @@
 # Tune Coach
 
-Tune Coach is a lightweight Python desktop app that captures your vocal pitch in real time and renders a rolling **Jianpu** (numbered notation) trace. It focuses on **fast Do calibration**, **clear visual feedback**, and **keyboard-based reference tones** while you sing.
+Tune Coach is a lightweight Python desktop app that captures your vocal pitch in real time and renders a rolling **Jianpu** (numbered notation) trace. It focuses on **fast Do calibration**, **clear visual feedback**, **keyboard-based reference tones**, and **record + pitch‑shift playback** so you can hear “what one step higher/lower sounds like” using your own voice.
 
 ## Features
 
@@ -8,6 +8,7 @@ Tune Coach is a lightweight Python desktop app that captures your vocal pitch in
 - **Manual Do input**: default Do is **130.8 Hz**; you can edit it and press **Enter**.
 - **Tuning systems**: **Just Intonation** (default) or **Equal Temperament**.
 - **Keyboard instrument**: play scale tones using keys `1..7` (default **Guitar**, switchable to Piano).
+- **Record + Shift + Play**: record up to 10 seconds, then play back your voice shifted by ±5 scale steps.
 - **Rolling pitch trace**: shows **24 seconds** of Jianpu steps with 1‑second grid lines.
 - **Metronome**: optional BPM click.
 
@@ -15,7 +16,7 @@ Tune Coach is a lightweight Python desktop app that captures your vocal pitch in
 
 ## Install
 
-Recommended: Python 3.10+.
+Recommended: Python 3.10+ (tested on macOS).
 
 ```bash
 python -m venv .venv
@@ -24,7 +25,10 @@ pip install -U pip
 pip install -e .
 ```
 
-No extra `aubio` is required (this project uses a pure‑numpy pitch tracker to avoid build issues).
+This installs `librosa`, `soundfile`, and `pyworld` (for higher‑quality voice shifting).
+
+Note: You may see a macOS console warning like:
+`error messaging the mach port for IMKCFRunLoopWakeUpReliable` — it is benign.
 
 ## Run
 
@@ -46,6 +50,11 @@ tune-coach
    - Type a Do frequency and press **Enter**.
 3. Optional: enable **Metronome** and set BPM.
 4. Use keyboard tones to check pitch or guide practice (default instrument is Guitar).
+5. To record and shift your voice:
+   - Click **Start** (record/play only works while listening).
+   - Press and hold **Recording**, sing, then release.
+   - Choose **Shift -5..+5 steps**.
+   - Click **Play** to hear the shifted voice once.
 
 ## Keyboard instrument
 
@@ -54,6 +63,13 @@ tune-coach
 - `Control + 1..7`: low octave
 - Hold key to sustain; release to stop.
 - Works when the app window is focused.
+
+## Record + Shift + Play
+
+- **Press‑and‑hold** Recording, then release to stop (max 10 seconds).
+- **Shift steps** are in major‑scale degrees (natural scale).
+- **Play** plays once. **Stop** cancels recording/playback.
+- The metronome is not mixed into the recording.
 
 ## Pitch display (Jianpu)
 
@@ -68,6 +84,7 @@ tune-coach
 - **No sound / no pitch**: sing louder or closer to the mic; check system input device.
 - **Calibration failed**: sing a clearer, steadier Do; avoid heavy vibrato.
 - **Keyboard instrument silent**: make sure the app window has focus.
+- **Playback says “Processing…” too long**: try a shorter recording or fewer steps; check `pyworld` is installed.
 - **Missing deps**:
   - `python -m pip install -e .`
   - Verify interpreter points to `.venv`.
