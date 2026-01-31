@@ -88,6 +88,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recorded_audio: np.ndarray | None = None
         self._play_thread: threading.Thread | None = None
         self._play_lock = threading.Lock()
+        self._paused = False
+        self._pause_time: float | None = None
         self._shift_digit_keys = dict(self._SHIFT_DIGIT_KEYS)
         for name, degree in (("Key_Circumflex", 6), ("Key_Dead_Circumflex", 6)):
             key = getattr(QtCore.Qt.Key, name, None)
@@ -121,6 +123,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_ui()
         self.status_signal.connect(self._set_status)
+        self._apply_button_icons()
 
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(16)  # ~60 FPS UI update
@@ -131,6 +134,97 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_do_hz(self._DEFAULT_DO_HZ)
         self.plot.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.plot.setFocus()
+
+    def _apply_button_icons(self) -> None:
+        style = self.style()
+        self.btn_start.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        self.btn_stop.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaStop))
+        self.btn_play.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        record_icon = (
+            QtWidgets.QStyle.StandardPixmap.SP_MediaRecord
+            if hasattr(QtWidgets.QStyle.StandardPixmap, "SP_MediaRecord")
+            else QtWidgets.QStyle.StandardPixmap.SP_DialogYesButton
+        )
+        self.btn_record.setIcon(style.standardIcon(record_icon))
+        self._set_pause_icon(paused=False)
+        self._apply_button_styles()
+        self._set_pause_button_width()
+
+    def _set_pause_icon(self, *, paused: bool) -> None:
+        style = self.style()
+        if paused:
+            self.btn_pause.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+            self.btn_pause.setText("Resume")
+        else:
+            self.btn_pause.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPause))
+            self.btn_pause.setText("Pause")
+        self._set_pause_button_width()
+
+    def _set_pause_button_width(self) -> None:
+        metrics = self.btn_pause.fontMetrics()
+        text_width = max(
+            metrics.horizontalAdvance("Pause"),
+            metrics.horizontalAdvance("Resume"),
+        )
+        icon_w = max(0, self.btn_pause.iconSize().width())
+        padding = 24
+        spacing = 8 if icon_w > 0 else 0
+        self.btn_pause.setMinimumWidth(text_width + icon_w + padding + spacing)
+
+    def _apply_button_styles(self) -> None:
+        self._set_button_style(
+            self.btn_start,
+            base="#3fae5f",
+            hover="#4fcf73",
+            border="#2d8a49",
+        )
+        self._set_button_style(
+            self.btn_pause,
+            base="#e0a020",
+            hover="#f0b232",
+            border="#b27a18",
+        )
+        self._set_button_style(
+            self.btn_stop,
+            base="#d9534f",
+            hover="#e46a66",
+            border="#b84643",
+        )
+        self._set_button_style(
+            self.btn_record,
+            base="#c74b4b",
+            hover="#de5a5a",
+            border="#9f3a3a",
+        )
+        self._set_button_style(
+            self.btn_play,
+            base="#3f7acb",
+            hover="#4a8fe6",
+            border="#2f5fa0",
+        )
+
+    def _set_button_style(
+        self, button: QtWidgets.QPushButton, *, base: str, hover: str, border: str
+    ) -> None:
+        button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {base};
+                color: #ffffff;
+                border: 1px solid {border};
+                border-radius: 6px;
+                padding: 4px 10px;
+            }}
+            QPushButton:hover {{
+                background-color: {hover};
+            }}
+            QPushButton:disabled {{
+                background-color: #3b3b3b;
+                color: #8a8a8a;
+                border: 1px solid #444444;
+            }}
+            """
+        )
 
     def _build_ui(self) -> None:
         root = QtWidgets.QWidget()
@@ -148,8 +242,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preset_group.addButton(self.radio_female)
         self.radio_male.setChecked(True)
         self.btn_start = QtWidgets.QPushButton("Start")
+        self.btn_pause = QtWidgets.QPushButton("Pause")
         self.btn_stop = QtWidgets.QPushButton("Stop")
+        self.btn_start.setObjectName("btnStart")
+        self.btn_pause.setObjectName("btnPause")
+        self.btn_stop.setObjectName("btnStop")
         self.btn_start.setEnabled(False)
+        self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
 
         controls.addWidget(self.btn_calibrate)
@@ -176,12 +275,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         controls.addStretch(1)
         controls.addWidget(self.btn_start)
+        controls.addWidget(self.btn_pause)
         controls.addWidget(self.btn_stop)
 
         self.btn_calibrate.clicked.connect(self._on_calibrate)
         self.radio_male.toggled.connect(self._on_preset_toggle)
         self.radio_female.toggled.connect(self._on_preset_toggle)
         self.btn_start.clicked.connect(self._on_start)
+        self.btn_pause.clicked.connect(self._on_pause_clicked)
         self.btn_stop.clicked.connect(self._on_stop)
         self.tuning_combo.currentTextChanged.connect(self._on_tuning_change)
         self.instrument_combo.currentTextChanged.connect(self._on_instrument_change)
@@ -269,6 +370,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.setMenuEnabled(False)
         self.plot.setLabel("bottom", "Time", units="s")
+        self.plot.scene().sigMouseClicked.connect(self._on_plot_click)
 
         self._axis = JianpuAxis(octave_gap=0)
         plot_item = self.plot.getPlotItem()
@@ -343,7 +445,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._reset_trace()
         self._start_time = time.monotonic()
+        self._paused = False
+        self._pause_time = None
         self.btn_start.setEnabled(False)
+        self.btn_pause.setEnabled(True)
+        self._set_pause_icon(paused=False)
         self.btn_stop.setEnabled(True)
         self.btn_calibrate.setEnabled(False)
         self.btn_record.setEnabled(True)
@@ -358,6 +464,58 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot()
     def _on_stop(self) -> None:
         self._stop_listening()
+
+    @QtCore.Slot()
+    def _on_pause_clicked(self) -> None:
+        if not self._timer.isActive() and not self._paused:
+            return
+        if self._paused:
+            self._resume_listening()
+        else:
+            self._pause_listening()
+
+    def _pause_listening(self) -> None:
+        if self._paused or not self._timer.isActive():
+            return
+        self._paused = True
+        self._pause_time = time.monotonic()
+        self._timer.stop()
+        self._audio.stop()
+        self._audio.set_tap(None)
+        self._stop_recording(cancel=True)
+        self._stop_playback()
+        self._metronome.stop()
+        self.btn_record.setEnabled(False)
+        self.btn_play.setEnabled(False)
+        self._set_pause_icon(paused=True)
+        self._set_status("Paused", "info")
+        self._y_smooth.clear()
+        self._y_history.clear()
+        self._cent_smooth.clear()
+        self._current_y = None
+        self._candidate_y = None
+        self._candidate_count = 0
+        self._last_voiced_time = None
+        self._last_output_nan = False
+        self._cent_last_output_nan = False
+
+    def _resume_listening(self) -> None:
+        if not self._paused:
+            return
+        self._paused = False
+        now = time.monotonic()
+        if self._pause_time is not None and self._start_time is not None:
+            self._start_time += now - self._pause_time
+        self._pause_time = None
+        self._audio.start()
+        if self.chk_metronome.isChecked():
+            self._metronome.set_bpm(int(self.spin_bpm.value()))
+            self._metronome.start()
+        self._timer.start()
+        self.btn_record.setEnabled(True)
+        self.btn_play.setEnabled(self._recorded_audio is not None)
+        self._set_pause_icon(paused=False)
+        self._set_status("Listening...", "info")
 
     @QtCore.Slot(bool)
     def _on_metronome_toggle(self, enabled: bool) -> None:
@@ -635,6 +793,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.do_input.setValue(float(do_hz))
         self.do_input.blockSignals(False)
 
+    def _on_plot_click(self, event) -> None:
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            return
+        if not self._timer.isActive() and not self._paused:
+            return
+        if self._paused:
+            self._resume_listening()
+        else:
+            self._pause_listening()
+
     def _parse_tuning(self, text: str) -> TuningSystem:
         try:
             return TuningSystem(text)
@@ -686,7 +854,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._audio.set_tap(None)
         self._stop_recording(cancel=True)
         self._stop_playback()
+        self._paused = False
+        self._pause_time = None
         self.btn_start.setEnabled(self._quantizer is not None)
+        self.btn_pause.setEnabled(False)
+        self._set_pause_icon(paused=False)
         self.btn_stop.setEnabled(False)
         self.btn_calibrate.setEnabled(True)
         self.btn_record.setEnabled(False)
