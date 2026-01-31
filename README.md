@@ -1,12 +1,14 @@
 # Tune Coach
 
-Tune Coach is a lightweight Python desktop app that captures your vocal pitch in real time and renders a rolling **Jianpu** (numbered notation) trace. It focuses on **fast Do calibration**, **clear visual feedback**, **keyboard-based reference tones**, and **record + pitch‑shift playback** so you can hear “what one step higher/lower sounds like” using your own voice.
+Tune Coach is a lightweight Python desktop app that captures your vocal pitch in real time and renders a rolling **Jianpu** (numbered notation) trace. It focuses on **fast Do calibration**, **clear visual feedback**, **key transposition**, **keyboard reference tones**, and **record + pitch‑shift playback** so you can hear “what one step higher/lower sounds like” using your own voice.
 
 ## Features
 
 - **Do calibration (4s)**: sing a single Do within 4 seconds. The app finds the loudest stable 0.5–1.5s window and uses its median Hz as Do.
-- **Manual Do input**: default Do is **130.8 Hz**; you can edit it and press **Enter**.
+- **Do presets**: **Male (130.8 Hz)** and **Female (261.6 Hz)**.
+- **Manual Do input**: type a frequency and press **Enter**.
 - **Tuning systems**: **Just Intonation** (default) or **Equal Temperament**.
+- **Key (1=Key) transposition**: set the song key (e.g. 1=G) and all 1..7 notes follow it.
 - **Keyboard instrument**: play scale tones using keys `1..7` (default **Guitar**, switchable to Piano).
 - **Record + Shift + Play**: record up to 10 seconds, then play back your voice shifted by ±5 scale steps.
 - **Rolling pitch trace**: shows **24 seconds** of Jianpu steps with 1‑second grid lines.
@@ -48,11 +50,13 @@ tune-coach
 1. Launch the app and click **Start** to begin listening (default Do = 130.8 Hz).
 2. If you want your own Do:
    - Click **Calibrate (4s)** and sing a clear **Do** within 4 seconds, or
+   - Select **Male/Female** presets, or
    - Type a Do frequency and press **Enter**.
 3. Optional: enable **Metronome** and set BPM.
 4. Optional: enable **Cent Curve** to see your continuous pitch track.
-5. Use keyboard tones to check pitch or guide practice (default instrument is Guitar).
-6. To record and shift your voice:
+5. Choose **Key (1=Key)** if the song is transposed (default 1=C).
+6. Use keyboard tones to check pitch or guide practice (default instrument is Guitar).
+7. To record and shift your voice:
    - Click **Start** (record/play only works while listening).
    - Press and hold **Recording**, sing, then release.
    - Choose **Shift -5..+5 steps**.
@@ -81,6 +85,7 @@ tune-coach
   - **Just Intonation** (natural major scale ratios)
   - **Equal Temperament** (12‑TET)
 - **Cent Curve** (optional) shows the continuous pitch path aligned to the same Jianpu axis and tuning.
+- **Key transposition**: Do is treated as the base C. Selecting 1=G, 1=F#, etc. shifts the scale so that 1 maps to that key, then 2..7 follow the selected tuning.
 
 ## Troubleshooting
 

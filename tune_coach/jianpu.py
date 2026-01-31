@@ -52,28 +52,31 @@ class JianpuQuantizer:
     do_hz: float
     octave_gap: int = 0
     tuning: TuningSystem = TuningSystem.EQUAL_TEMPERAMENT
+    key_semitone: int = 0
 
     def degree_hz(self, degree: int, octave: int = 0) -> float | None:
         if degree < 1 or degree > 7 or self.do_hz <= 0:
             return None
         degree_index = degree - 1
+        root_hz = float(self.do_hz * (2.0 ** (self.key_semitone / 12.0)))
         if self.tuning == TuningSystem.JUST_INTONATION:
             ratio = _JUST_INTONATION_RATIOS[degree_index]
-            return float(self.do_hz * ratio * (2.0**octave))
+            return float(root_hz * ratio * (2.0**octave))
         semitone = _MAJOR_SCALE_SEMITONES[degree_index] + 12 * octave
-        return float(self.do_hz * (2.0 ** (semitone / 12.0)))
+        return float(root_hz * (2.0 ** (semitone / 12.0)))
 
     def quantize_to_y(self, hz: float) -> int | None:
         if hz <= 0 or self.do_hz <= 0:
             return None
+        root_hz = float(self.do_hz * (2.0 ** (self.key_semitone / 12.0)))
         best = None
         best_err = 10**9
         for octave in (-1, 0, 1):
             for degree_index, semitone in enumerate(_MAJOR_SCALE_SEMITONES):
                 if self.tuning == TuningSystem.JUST_INTONATION:
-                    target = self.do_hz * _JUST_INTONATION_RATIOS[degree_index] * (2.0**octave)
+                    target = root_hz * _JUST_INTONATION_RATIOS[degree_index] * (2.0**octave)
                 else:
-                    target = self.do_hz * (2.0 ** ((semitone + 12 * octave) / 12.0))
+                    target = root_hz * (2.0 ** ((semitone + 12 * octave) / 12.0))
                 if target <= 0:
                     continue
                 err = abs(math.log2(hz / target))
@@ -96,7 +99,8 @@ class JianpuQuantizer:
     def nearest_degree(self, hz: float) -> tuple[int, int] | None:
         if hz <= 0 or self.do_hz <= 0:
             return None
-        semitone = 12.0 * math.log2(hz / self.do_hz)
+        root_hz = float(self.do_hz * (2.0 ** (self.key_semitone / 12.0)))
+        semitone = 12.0 * math.log2(hz / root_hz)
         best = None
         best_err = 10**9
         for octave in range(-3, 4):
@@ -112,7 +116,8 @@ class JianpuQuantizer:
     def continuous_y(self, hz: float) -> float | None:
         if hz <= 0 or self.do_hz <= 0:
             return None
-        cents_total = 1200.0 * math.log2(hz / self.do_hz)
+        root_hz = float(self.do_hz * (2.0 ** (self.key_semitone / 12.0)))
+        cents_total = 1200.0 * math.log2(hz / root_hz)
         octave = math.floor(cents_total / 1200.0)
         if octave < -1 or octave > 1:
             return None

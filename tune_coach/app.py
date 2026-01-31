@@ -52,6 +52,21 @@ class MainWindow(QtWidgets.QMainWindow):
     _NSEVENT_CTRL_MASK = 1 << 18
     _NSEVENT_CMD_MASK = 1 << 20
     _DEFAULT_DO_HZ = 130.8
+    _FEMALE_DO_HZ = 261.6
+    _KEY_OPTIONS = [
+        ("1=C", 0),
+        ("1=C#/Db", 1),
+        ("1=D", 2),
+        ("1=D#/Eb", 3),
+        ("1=E", 4),
+        ("1=F", 5),
+        ("1=F#/Gb", 6),
+        ("1=G", 7),
+        ("1=G#/Ab", 8),
+        ("1=A", 9),
+        ("1=A#/Bb", 10),
+        ("1=B", 11),
+    ]
 
     def __init__(self) -> None:
         super().__init__()
@@ -125,12 +140,22 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(controls)
 
         self.btn_calibrate = QtWidgets.QPushButton("Calibrate (4s)")
+        self.radio_male = QtWidgets.QRadioButton("Male")
+        self.radio_female = QtWidgets.QRadioButton("Female")
+        self._preset_group = QtWidgets.QButtonGroup(self)
+        self._preset_group.setExclusive(True)
+        self._preset_group.addButton(self.radio_male)
+        self._preset_group.addButton(self.radio_female)
+        self.radio_male.setChecked(True)
         self.btn_start = QtWidgets.QPushButton("Start")
         self.btn_stop = QtWidgets.QPushButton("Stop")
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(False)
 
         controls.addWidget(self.btn_calibrate)
+        controls.addSpacing(8)
+        controls.addWidget(self.radio_male)
+        controls.addWidget(self.radio_female)
         controls.addSpacing(12)
 
         self.tuning_combo = QtWidgets.QComboBox()
@@ -154,6 +179,8 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.addWidget(self.btn_stop)
 
         self.btn_calibrate.clicked.connect(self._on_calibrate)
+        self.radio_male.toggled.connect(self._on_preset_toggle)
+        self.radio_female.toggled.connect(self._on_preset_toggle)
         self.btn_start.clicked.connect(self._on_start)
         self.btn_stop.clicked.connect(self._on_stop)
         self.tuning_combo.currentTextChanged.connect(self._on_tuning_change)
@@ -220,10 +247,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.do_input.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
         self._fix_spinbox_style(self.do_input)
         self.do_input.editingFinished.connect(self._on_do_input)
+        self.key_combo = QtWidgets.QComboBox()
+        for label, _ in self._KEY_OPTIONS:
+            self.key_combo.addItem(label)
+        self.key_combo.currentTextChanged.connect(self._on_key_change)
+        self.key_combo.setFixedWidth(120)
+        self.key_label = QtWidgets.QLabel("Key:")
         status_layout.addWidget(self.status)
         status_layout.addStretch(1)
         status_layout.addWidget(self.do_label)
         status_layout.addWidget(self.do_input)
+        status_layout.addSpacing(8)
+        status_layout.addWidget(self.key_label)
+        status_layout.addWidget(self.key_combo)
         layout.addLayout(status_layout)
 
         pg.setConfigOptions(antialias=True)
@@ -297,6 +333,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self._apply_do_hz(do_hz)
+        self._update_preset_radios(do_hz)
 
     @QtCore.Slot()
     def _on_start(self) -> None:
@@ -532,27 +569,66 @@ class MainWindow(QtWidgets.QMainWindow):
                 do_hz=self._quantizer.do_hz,
                 octave_gap=self._quantizer.octave_gap,
                 tuning=tuning,
+                key_semitone=self._quantizer.key_semitone,
+            )
+            self._reset_trace()
+
+    def _on_key_change(self, text: str) -> None:
+        key_semitone = self._parse_key_semitone(text)
+        if self._quantizer is not None:
+            self._quantizer = JianpuQuantizer(
+                do_hz=self._quantizer.do_hz,
+                octave_gap=self._quantizer.octave_gap,
+                tuning=self._quantizer.tuning,
+                key_semitone=key_semitone,
             )
             self._reset_trace()
 
     def _on_instrument_change(self, text: str) -> None:
         self._synth.set_instrument(text)
 
+    def _on_preset_toggle(self) -> None:
+        if self.radio_male.isChecked():
+            self._apply_do_hz(self._DEFAULT_DO_HZ)
+        elif self.radio_female.isChecked():
+            self._apply_do_hz(self._FEMALE_DO_HZ)
+
     def _on_do_input(self) -> None:
         do_hz = float(self.do_input.value())
         if do_hz <= 0:
             return
         self._apply_do_hz(do_hz)
+        self._update_preset_radios(do_hz)
 
     def _apply_do_hz(self, do_hz: float) -> None:
         if self._timer.isActive():
             self._stop_listening()
         tuning = self._parse_tuning(self.tuning_combo.currentText())
-        self._quantizer = JianpuQuantizer(do_hz=do_hz, octave_gap=0, tuning=tuning)
+        key_semitone = self._parse_key_semitone(self.key_combo.currentText())
+        self._quantizer = JianpuQuantizer(
+            do_hz=do_hz,
+            octave_gap=0,
+            tuning=tuning,
+            key_semitone=key_semitone,
+        )
         self._set_do_input(do_hz)
         self._reset_trace()
         self._set_status("Ready to listen", "ready")
         self.btn_start.setEnabled(True)
+
+    def _parse_key_semitone(self, text: str) -> int:
+        for label, semitone in self._KEY_OPTIONS:
+            if label == text:
+                return int(semitone)
+        return 0
+
+    def _update_preset_radios(self, do_hz: float) -> None:
+        is_male = abs(do_hz - self._DEFAULT_DO_HZ) <= 0.1
+        is_female = abs(do_hz - self._FEMALE_DO_HZ) <= 0.1
+        self._preset_group.setExclusive(False)
+        self.radio_male.setChecked(is_male)
+        self.radio_female.setChecked(is_female)
+        self._preset_group.setExclusive(True)
 
     def _set_do_input(self, do_hz: float) -> None:
         self.do_input.blockSignals(True)
