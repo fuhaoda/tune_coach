@@ -399,6 +399,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cent_curve.setVisible(False)
 
         self._second_lines: list[pg.InfiniteLine] = []
+        self._ref_lines: list[pg.InfiniteLine] = []
         self.setCentralWidget(root)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
@@ -884,6 +885,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self._second_lines.append(line)
 
         self.plot.setXRange(-self._ui.window_seconds - self._ui.left_margin_seconds, 0.0)
+        self._reset_reference_lines()
+
+    def _reset_reference_lines(self) -> None:
+        for line in self._ref_lines:
+            self.plot.removeItem(line)
+        self._ref_lines.clear()
+
+        color = (210, 80, 80, 180)
+        for octave_index in (0, 1):
+            y = octave_index * (7 + self._axis._octave_gap) + 6  # degree 7 in low/mid octaves
+            line = pg.InfiniteLine(
+                pos=y,
+                angle=0,
+                pen=pg.mkPen(color=color, width=2),
+            )
+            self.plot.addItem(line)
+            self._ref_lines.append(line)
 
     def _backfill_buffer(self, start_time: float, y_value: int) -> None:
         if not self._buffer:

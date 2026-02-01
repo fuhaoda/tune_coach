@@ -15,6 +15,7 @@ Tune Coach is a lightweight Python desktop app that captures your vocal pitch in
 - **Rolling pitch trace**: shows **24 seconds** of Jianpu steps with 1‑second grid lines.
 - **Cent curve overlay**: optional continuous pitch curve aligned to the Jianpu axis.
 - **Metronome**: optional BPM click.
+- **Reference lines**: two guide lines at degree 7 (low/mid) for quick orientation.
 
 > This app visualizes pitch and timing; it does not grade accuracy.
 
