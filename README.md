@@ -1,101 +1,146 @@
 # Tune Coach
 
-Tune Coach is a lightweight Python desktop app that captures your vocal pitch in real time and renders a rolling **Jianpu** (numbered notation) trace. It focuses on **fast Do calibration**, **clear visual feedback**, **key transposition**, **keyboard reference tones**, and **record + pitch‑shift playback** so you can hear “what one step higher/lower sounds like” using your own voice.
+Tune Coach includes two runnable products in one repo:
 
-## Features
+1. Desktop app (PySide6) for local practice.
+2. Web app (FastAPI backend + React frontend) for browser access across devices.
 
-- **Do calibration (4s)**: sing a single Do within 4 seconds. The app finds the loudest stable 0.5–1.5s window and uses its median Hz as Do.
-- **Do presets**: **Male (130.8 Hz)** and **Female (261.6 Hz)**.
-- **Manual Do input**: type a frequency and press **Enter**.
-- **Tuning systems**: **Just Intonation** (default) or **Equal Temperament**.
-- **Key (1=Key) transposition**: set the song key (e.g. 1=G) and all 1..7 notes follow it.
-- **Pause / Resume**: pause the session to inspect the curves, then resume.
-- **Keyboard instrument**: play scale tones using keys `1..7` (default **Guitar**, switchable to Piano).
-- **Record + Shift + Play**: record up to 10 seconds, then play back your voice shifted by ±5 scale steps.
-- **Rolling pitch trace**: shows **24 seconds** of Jianpu steps with 1‑second grid lines.
-- **Cent curve overlay**: optional continuous pitch curve aligned to the Jianpu axis.
-- **Metronome**: optional BPM click.
-- **Reference lines**: two guide lines at degree 7 (low/mid) for quick orientation.
+Both are kept in this branch. Desktop behavior is not replaced by the web stack.
 
-> This app visualizes pitch and timing; it does not grade accuracy.
+## What Is In This Repo
 
-## Install
+- Desktop entrypoint: `python -m tune_coach`
+- Web backend entrypoint: `python -m tune_coach.web.server`
+- Web frontend source: `webapp/`
+- Docker deployment files: `Dockerfile`, `docker-compose.yml`, `deploy/`
 
-Recommended: Python 3.10+ (tested on macOS).
+## Prerequisites
+
+- Python `3.10+`
+- Node.js `20+` and `npm` (for web frontend build/dev)
+- Docker Engine + Docker Compose plugin (for container deployment)
+
+## 1) Desktop App Install And Run
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 pip install -e .
-```
-
-This installs `librosa`, `soundfile`, and `pyworld` (for higher‑quality voice shifting).
-
-Note: You may see a macOS console warning like:
-`error messaging the mach port for IMKCFRunLoopWakeUpReliable` — it is benign.
-
-## Run
-
-```bash
 python -m tune_coach
 ```
 
-Or use the CLI entrypoint:
+Equivalent CLI entrypoint:
 
 ```bash
 tune-coach
 ```
 
-## Quick start
+## 2) Web App Local Run (No Docker)
 
-1. Launch the app and click **Start** to begin listening (default Do = 130.8 Hz).
-2. If you want your own Do:
-   - Click **Calibrate (4s)** and sing a clear **Do** within 4 seconds, or
-   - Select **Male/Female** presets, or
-   - Type a Do frequency and press **Enter**.
-3. Optional: enable **Metronome** and set BPM.
-4. Optional: enable **Cent Curve** to see your continuous pitch track.
-5. Choose **Key (1=Key)** if the song is transposed (default 1=C).
-6. Use **Pause** to freeze the display; click again to **Resume**.
-7. Use keyboard tones to check pitch or guide practice (default instrument is Guitar).
-8. To record and shift your voice:
-   - Click **Start** (record/play only works while listening).
-   - Press and hold **Recording**, sing, then release.
-   - Choose **Shift -5..+5 steps**.
-   - Click **Play** to hear the shifted voice once.
+This mode is for local testing and UI iteration.
 
-## Keyboard instrument
+### Backend
 
-- `1..7`: play Do–Ti (current octave)
-- `Shift + 1..7`: high octave
-- `Control + 1..7`: low octave
-- Hold key to sustain; release to stop.
-- Works when the app window is focused.
+```bash
+source .venv/bin/activate
+python -m tune_coach.web.server
+```
 
-## Record + Shift + Play
+Backend serves on `http://localhost:8000`.
 
-- **Press‑and‑hold** Recording, then release to stop (max 10 seconds).
-- **Shift steps** are in major‑scale degrees (natural scale).
-- **Play** plays once. **Stop** cancels recording/playback.
-- The metronome is not mixed into the recording.
+### Frontend build for backend static hosting
 
-## Pitch display (Jianpu)
+```bash
+cd webapp
+npm install
+npm run build
+cd ..
+```
 
-- Do is `1`. Incoming pitch is mapped to the nearest major‑scale degree.
-- Octaves are shown by dots above/below the digits.
-- Tuning rules follow the dropdown selection:
-  - **Just Intonation** (natural major scale ratios)
-  - **Equal Temperament** (12‑TET)
-- **Cent Curve** (optional) shows the continuous pitch path aligned to the same Jianpu axis and tuning.
-- **Key transposition**: Do is treated as the base C. Selecting 1=G, 1=F#, etc. shifts the scale so that 1 maps to that key, then 2..7 follow the selected tuning.
+After build, open `http://localhost:8000`.
 
-## Troubleshooting
+### Frontend dev server (optional)
 
-- **No sound / no pitch**: sing louder or closer to the mic; check system input device.
-- **Calibration failed**: sing a clearer, steadier Do; avoid heavy vibrato.
-- **Keyboard instrument silent**: make sure the app window has focus.
-- **Playback says “Processing…” too long**: try a shorter recording or fewer steps; check `pyworld` is installed.
-- **Missing deps**:
-  - `python -m pip install -e .`
-  - Verify interpreter points to `.venv`.
+```bash
+cd webapp
+npm run dev
+```
+
+Use this for hot reload while developing UI.
+
+## 3) Web App Docker Deploy (LAN + HTTPS)
+
+Docker deploy exposes the app at:
+
+- `https://<server-ip>:18863`
+
+Start or rebuild:
+
+```bash
+docker compose up -d --build
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+Check running status:
+
+```bash
+docker compose ps
+curl -k https://<server-ip>:18863/api/health
+```
+
+## 4) Update Procedure
+
+Use this when code changed and you want to refresh deployment.
+
+```bash
+git pull
+docker compose up -d --build --remove-orphans
+docker image prune -f
+```
+
+If only Python/frontend code changed, this is enough. No manual container cleanup is needed.
+
+## 5) iPhone/iPad HTTPS Certificate Trust
+
+`deploy/Caddyfile` uses `tls internal`. Mobile browsers require trusted HTTPS for microphone APIs.
+
+Export local CA certificate:
+
+```bash
+docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./deploy/caddy-local-root.crt
+```
+
+Install and trust `deploy/caddy-local-root.crt` on iOS/iPadOS, then reopen Safari/Chrome and grant mic permission.
+
+## 6) Auto Start After Linux Reboot
+
+Install service from repo:
+
+```bash
+sudo mkdir -p /opt/tune_coach
+sudo rsync -a --delete ./ /opt/tune_coach/
+sudo cp deploy/tune-coach.service /etc/systemd/system/tune-coach.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now docker
+sudo systemctl enable --now tune-coach
+```
+
+Check:
+
+```bash
+systemctl status tune-coach
+docker compose -f /opt/tune_coach/docker-compose.yml ps
+```
+
+## 7) Quick Troubleshooting
+
+- White page on `:8000`: run `npm run build` in `webapp/` first.
+- Web keyboard no sound in Safari: click any control once to unlock audio context, then press keys again.
+- `python -m tune_coach.web.server` warning about `sys.modules`: use `uvicorn tune_coach.web.server:app --host 0.0.0.0 --port 8000`.
+- Mobile mic unavailable: HTTPS or certificate trust is not ready.

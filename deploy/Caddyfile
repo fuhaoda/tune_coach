@@ -1,0 +1,12 @@
+:443 {
+  tls internal
+  encode zstd gzip
+
+  @api path /api/*
+  reverse_proxy @api app:8000
+
+  @ws path /ws/*
+  reverse_proxy @ws app:8000
+
+  reverse_proxy app:8000
+}
