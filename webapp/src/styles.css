@@ -1,0 +1,364 @@
+:root {
+  --bg-1: #f3f7f2;
+  --bg-2: #dfe9d7;
+  --surface: #ffffff;
+  --ink: #182322;
+  --muted: #4e5f5b;
+  --accent: #2b6ea5;
+  --accent-2: #cd5d3a;
+  --ok: #3f9c5f;
+  --warn: #cf8b27;
+  --danger: #cb4f4f;
+  --border: #c6d2cb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: 'Space Grotesk', 'Avenir Next', 'Trebuchet MS', sans-serif;
+  background: radial-gradient(circle at 15% 20%, var(--bg-2), var(--bg-1) 48%, #eef2eb 100%);
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.top-controls,
+.sub-controls,
+.status-row,
+.touchpad-section {
+  background: color-mix(in srgb, var(--surface) 92%, #ebf2e6 8%);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  box-shadow: 0 8px 22px rgba(19, 31, 27, 0.08);
+}
+
+.top-controls {
+  gap: 8px;
+  row-gap: 6px;
+}
+
+.sub-controls {
+  gap: 12px;
+  row-gap: 6px;
+}
+
+.chart-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px;
+  min-height: 504px;
+  box-shadow: 0 8px 24px rgba(19, 31, 27, 0.08);
+}
+
+.pitch-chart {
+  width: 100%;
+  min-height: 480px;
+  height: 480px;
+  border-radius: 8px;
+  border: 1px solid #e3e8e2;
+  cursor: pointer;
+}
+
+.status {
+  font-size: 0.96rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.status-meta {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.meta-pill {
+  border: 1px solid color-mix(in srgb, var(--border) 78%, #9fb1aa 22%);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: color-mix(in srgb, #fff 92%, #eef3ec 8%);
+  color: var(--muted);
+  line-height: 1.1;
+}
+
+.meta-pill.online {
+  border-color: #95be9f;
+  color: #2f7d44;
+}
+
+.meta-pill.offline {
+  border-color: #cf9494;
+  color: #9d4747;
+}
+
+.btn,
+select,
+input {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--ink);
+  font-family: 'Space Grotesk', 'Avenir Next', 'Trebuchet MS', sans-serif;
+  font-size: 0.95rem;
+}
+
+.btn {
+  padding: 7px 13px;
+  cursor: pointer;
+  font-weight: 700;
+  transition: transform 90ms ease, background-color 90ms ease;
+}
+
+.top-controls .btn {
+  background: #e8f2ec;
+  border-color: #8aa39a;
+  box-shadow: 0 3px 10px rgba(18, 30, 26, 0.12);
+}
+
+.top-controls .btn.active {
+  background: #cfe0fb;
+  border-color: #6a92c6;
+}
+
+.btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn.active {
+  background: #dce9fb;
+  border-color: #86a9d2;
+}
+
+.btn.start {
+  background: #c9f0d5;
+  border-color: #5faa7b;
+}
+
+.btn.pause {
+  background: #ffe3b4;
+  border-color: #d28c2a;
+}
+
+.btn.stop {
+  background: #f6c2c2;
+  border-color: #c96565;
+}
+
+.btn.record {
+  background: #f8d2d2;
+  border-color: #d16f6f;
+}
+
+.btn.record.active {
+  background: #ef9d9d;
+  border-color: #c15454;
+}
+
+.field-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.field-group span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.field-group select,
+.field-group input {
+  padding: 5px 8px;
+}
+
+.field-group.compact input {
+  width: 88px;
+}
+
+.field-group.field-tuning select {
+  width: 182px;
+}
+
+.field-group.field-instrument select {
+  width: 116px;
+}
+
+.field-group.field-key select {
+  width: 126px;
+}
+
+.field-group.field-do input {
+  width: 86px;
+}
+
+.status-row .field-group span {
+  font-size: 0.8rem;
+}
+
+.status-row .field-group select,
+.status-row .field-group input {
+  padding: 4px 6px;
+  font-size: 0.85rem;
+}
+
+.radios {
+  gap: 6px;
+}
+
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.touch-pad {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.38fr) minmax(180px, 0.62fr);
+  gap: 12px;
+  width: 100%;
+}
+
+.touchpad-section {
+  display: none;
+}
+
+.modifiers {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 10px;
+  align-content: start;
+}
+
+.modifier {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #f9faf8;
+  font-weight: 700;
+  padding: 8px;
+  min-height: 52px;
+}
+
+.modifier.active {
+  background: #e4edff;
+  border-color: #8da9db;
+}
+
+.digits-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(56px, 1fr));
+  grid-template-rows: repeat(3, minmax(52px, 1fr));
+  gap: 8px;
+}
+
+.digit {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  font-size: 1.15rem;
+  font-weight: 800;
+  min-height: 52px;
+}
+
+.digit.empty {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(203, 211, 205, 0.22),
+    rgba(203, 211, 205, 0.22) 8px,
+    rgba(203, 211, 205, 0.36) 8px,
+    rgba(203, 211, 205, 0.36) 16px
+  );
+  border-style: dashed;
+}
+
+@media (max-width: 980px) {
+  .app-shell {
+    padding: 10px;
+  }
+
+  .chart-section {
+    min-height: 280px;
+  }
+
+  .pitch-chart {
+    min-height: 260px;
+    height: 260px;
+  }
+
+  .status-meta {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 680px) {
+  .touch-pad {
+    grid-template-columns: 1fr;
+  }
+
+  .modifiers {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto;
+  }
+
+  .btn,
+  select,
+  input,
+  .digit,
+  .modifier {
+    font-size: 1rem;
+  }
+}
+
+@media (pointer: coarse) {
+  .touchpad-section {
+    display: flex;
+  }
+}
+
+@media (max-width: 920px) and (orientation: landscape) {
+  .touch-pad {
+    grid-template-columns: minmax(128px, 0.34fr) minmax(260px, 0.66fr);
+    align-items: stretch;
+  }
+
+  .modifiers {
+    grid-template-rows: minmax(56px, 1fr) minmax(56px, 1fr);
+    gap: 8px;
+  }
+
+  .digits-grid {
+    grid-template-rows: repeat(3, minmax(56px, 1fr));
+  }
+}
