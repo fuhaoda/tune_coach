@@ -78,6 +78,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._quantizer: JianpuQuantizer | None = None
         self._metronome = Metronome(sample_rate=self._audio.sample_rate)
         self._synth = NoteSynth(sample_rate=self._audio.sample_rate)
+        self._processing_sample_rate = self._audio.sample_rate
         self._held_keys: dict[int, str] = {}
         self._recording = False
         self._recording_frames: list[np.ndarray] = []
@@ -86,6 +87,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recording_limit_hit = False
         self._recording_lock = threading.Lock()
         self._recorded_audio: np.ndarray | None = None
+        self._recorded_audio_sample_rate: int | None = None
         self._play_thread: threading.Thread | None = None
         self._play_lock = threading.Lock()
         self._paused = False
@@ -412,10 +414,36 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             super().closeEvent(event)
 
+    def _refresh_audio_pipeline(self) -> None:
+        if not self._audio.is_running:
+            self._audio.refresh_default_input()
+        sample_rate = self._audio.sample_rate
+        if sample_rate == self._processing_sample_rate:
+            return
+        self._pitch = PitchTracker(PitchTrackerConfig(sample_rate=sample_rate))
+        self._metronome.stop()
+        self._metronome = Metronome(sample_rate=sample_rate)
+        self._synth.stop()
+        self._synth = NoteSynth(sample_rate=sample_rate)
+        self._synth.set_instrument(self.instrument_combo.currentText())
+        self._recording_limit_samples = int(10 * sample_rate)
+        self._processing_sample_rate = sample_rate
+
+    def _start_audio_input(self) -> bool:
+        self._refresh_audio_pipeline()
+        try:
+            self._audio.start()
+        except Exception as exc:  # noqa: BLE001 - user-facing
+            self._set_status(f"Microphone unavailable: {exc}", "error")
+            return False
+        self._refresh_audio_pipeline()
+        return True
+
     @QtCore.Slot()
     def _on_calibrate(self) -> None:
         if self._timer.isActive():
             self._stop_listening()
+        self._refresh_audio_pipeline()
         self._set_status("Calibrating... sing Do now.", "info")
         QtWidgets.QApplication.processEvents()
         try:
@@ -444,6 +472,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_status("Calibrate or enter Do (Hz).", "error")
             return
 
+        if not self._start_audio_input():
+            return
+
         self._reset_trace()
         self._start_time = time.monotonic()
         self._paused = False
@@ -456,8 +487,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_record.setEnabled(True)
         self.btn_play.setEnabled(self._recorded_audio is not None)
         self._set_status("Listening...", "info")
-
-        self._audio.start()
         self._timer.start()
 
         self._reset_second_lines()
@@ -503,12 +532,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _resume_listening(self) -> None:
         if not self._paused:
             return
-        self._paused = False
+        if not self._start_audio_input():
+            return
         now = time.monotonic()
         if self._pause_time is not None and self._start_time is not None:
             self._start_time += now - self._pause_time
+        self._paused = False
         self._pause_time = None
-        self._audio.start()
         if self.chk_metronome.isChecked():
             self._metronome.set_bpm(int(self.spin_bpm.value()))
             self._metronome.start()
@@ -573,6 +603,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._recording_frames.clear()
                 self._recording_samples = 0
             self._recorded_audio = None
+            self._recorded_audio_sample_rate = None
             return
         with self._recording_lock:
             frames = list(self._recording_frames)
@@ -580,10 +611,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._recording_samples = 0
         if not frames:
             self._recorded_audio = None
+            self._recorded_audio_sample_rate = None
             self._set_status("Listening...", "info")
             self.btn_play.setEnabled(False)
             return
         self._recorded_audio = np.concatenate(frames).astype(np.float32, copy=False)
+        self._recorded_audio_sample_rate = self._audio.sample_rate
         self.btn_play.setEnabled(True)
         self._set_status("Listening...", "info")
 
@@ -608,27 +641,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             self._set_status("Processing...", "info")
             audio = self._recorded_audio.copy()
+            sample_rate = int(self._recorded_audio_sample_rate or self._audio.sample_rate)
             steps = int(self.spin_shift.value())
             self._play_thread = threading.Thread(
-                target=self._render_and_play, args=(audio, steps), daemon=True
+                target=self._render_and_play, args=(audio, steps, sample_rate), daemon=True
             )
             self._play_thread.start()
 
-    def _render_and_play(self, audio: np.ndarray, steps: int) -> None:
+    def _render_and_play(self, audio: np.ndarray, steps: int, sample_rate: int) -> None:
         try:
             start = time.monotonic()
-            ratio = self._degree_shift_ratio(audio, steps)
-            shifted = pitch_shift_formant(audio, self._audio.sample_rate, ratio)
+            ratio = self._degree_shift_ratio(audio, steps, sample_rate)
+            shifted = pitch_shift_formant(audio, sample_rate, ratio)
             if shifted.size == 0:
                 self._set_status_async("Playback failed (empty audio).", "error")
                 return
             shifted = self._match_rms(shifted, audio, max_gain=6.0)
-            shifted = self._apply_fade(shifted, ms=8.0)
+            shifted = self._apply_fade(shifted, ms=8.0, sample_rate=sample_rate)
             elapsed = time.monotonic() - start
             if elapsed > 8.0:
                 self._set_status_async(f"Processing slow ({elapsed:.1f}s).", "error")
             self._set_status_async("Playing...", "info")
-            sd.play(shifted, samplerate=self._audio.sample_rate, blocking=True)
+            sd.play(shifted, samplerate=sample_rate, blocking=True)
             self._set_status_async("Listening...", "info")
         except Exception as exc:  # noqa: BLE001 - user-facing
             self._set_status_async(f"Playback failed: {exc}", "error")
@@ -663,10 +697,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return float(np.sqrt(np.mean(np.square(x))))
         return float(np.percentile(np.array(rms_list, dtype=np.float32), percentile))
 
-    def _apply_fade(self, audio: np.ndarray, *, ms: float) -> np.ndarray:
+    def _apply_fade(self, audio: np.ndarray, *, ms: float, sample_rate: int) -> np.ndarray:
         if audio.size == 0:
             return audio
-        n = int((ms / 1000.0) * self._audio.sample_rate)
+        n = int((ms / 1000.0) * sample_rate)
         n = max(1, min(n, audio.size // 2))
         out = audio.copy()
         fade_in = np.linspace(0.0, 1.0, n, endpoint=False, dtype=np.float32)
@@ -678,8 +712,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_status_async(self, text: str, kind: str) -> None:
         self.status_signal.emit(text, kind)
 
-    def _estimate_recording_pitch(self, audio: np.ndarray) -> float | None:
-        tracker = PitchTracker(PitchTrackerConfig(sample_rate=self._audio.sample_rate))
+    def _estimate_recording_pitch(self, audio: np.ndarray, sample_rate: int) -> float | None:
+        tracker = PitchTracker(PitchTrackerConfig(sample_rate=sample_rate))
         hop = self._audio.block_size
         hz_list: list[float] = []
         for i in range(0, len(audio), hop):
@@ -693,13 +727,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return float(np.median(np.array(hz_list, dtype=np.float32)))
 
-    def _degree_shift_ratio(self, audio: np.ndarray, steps: int) -> float:
+    def _degree_shift_ratio(self, audio: np.ndarray, steps: int, sample_rate: int) -> float:
         if steps == 0:
             return 1.0
         quantizer = self._quantizer
         if quantizer is None:
             quantizer = JianpuQuantizer(do_hz=self._DEFAULT_DO_HZ, tuning=TuningSystem.JUST_INTONATION)
-        base_hz = self._estimate_recording_pitch(audio)
+        base_hz = self._estimate_recording_pitch(audio, sample_rate)
         if base_hz is None or base_hz <= 0:
             return float(2.0 ** ((2 * steps) / 12.0))
         nearest = quantizer.nearest_degree(base_hz)
