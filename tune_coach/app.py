@@ -430,6 +430,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._processing_sample_rate = sample_rate
 
     def _start_audio_input(self) -> bool:
+        if not self._audio.is_running:
+            self._audio.refresh_default_input(force=True)
         self._refresh_audio_pipeline()
         try:
             self._audio.start()
@@ -438,6 +440,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         self._refresh_audio_pipeline()
         return True
+
+    def _prime_audio_input(self) -> None:
+        if self._audio.is_running:
+            return
+        self._audio.refresh_default_input(force=True)
+        self._refresh_audio_pipeline()
 
     @QtCore.Slot()
     def _on_calibrate(self) -> None:
@@ -1118,8 +1126,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
         if event.type() == QtCore.QEvent.Type.ApplicationDeactivate:
             self._release_all_notes()
+        elif event.type() == QtCore.QEvent.Type.ApplicationActivate:
+            self._prime_audio_input()
         elif event.type() == QtCore.QEvent.Type.WindowDeactivate:
             self._release_all_notes()
+        elif event.type() == QtCore.QEvent.Type.WindowActivate:
+            self._prime_audio_input()
         if event.type() == QtCore.QEvent.Type.KeyPress:
             if self._handle_key_press(event):
                 return True

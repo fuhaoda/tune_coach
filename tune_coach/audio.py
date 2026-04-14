@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -17,6 +18,8 @@ class AudioInputConfig:
 
 
 class AudioInput:
+    _OPEN_RETRY_DELAYS = (0.0, 0.15, 0.35)
+
     def __init__(self, config: AudioInputConfig | None = None) -> None:
         self._cfg = config or AudioInputConfig()
         self._lock = threading.Lock()
@@ -39,12 +42,11 @@ class AudioInput:
     def is_running(self) -> bool:
         return self._stream is not None
 
-    def refresh_default_input(self) -> None:
-        if self._stream is not None:
+    def refresh_default_input(self, *, force: bool = False) -> None:
+        if self._stream is not None and not force:
             return
-        try:
-            device = sd.query_devices(kind="input")
-        except Exception:
+        device = self._resolve_default_input_device()
+        if device is None:
             self._device = None
             self._sample_rate = int(self._cfg.sample_rate)
             return
@@ -68,25 +70,30 @@ class AudioInput:
                 tap(mono)
 
         last_exc: Exception | None = None
-        for attempt in range(2):
-            try:
-                self._stream = sd.InputStream(
-                    device=self._device,
-                    samplerate=self._sample_rate,
-                    channels=self._cfg.channels,
-                    blocksize=self._cfg.block_size,
-                    dtype="float32",
-                    callback=callback,
-                )
-                self._stream.start()
-                return
-            except Exception as exc:
-                last_exc = exc
-                self._stream = None
-                if attempt == 0:
-                    self.refresh_default_input()
-                    continue
-                raise
+        with self._lock:
+            self._latest = None
+
+        for retry_delay in self._OPEN_RETRY_DELAYS:
+            if retry_delay > 0:
+                time.sleep(retry_delay)
+            self.refresh_default_input(force=True)
+            for device, sample_rate in self._iter_open_settings():
+                try:
+                    self._stream = sd.InputStream(
+                        device=device,
+                        samplerate=sample_rate,
+                        channels=self._cfg.channels,
+                        blocksize=self._cfg.block_size,
+                        dtype="float32",
+                        callback=callback,
+                    )
+                    self._stream.start()
+                    self._device = device
+                    self._sample_rate = sample_rate
+                    return
+                except Exception as exc:
+                    last_exc = exc
+                    self._stream = None
         if last_exc is not None:
             raise last_exc
 
@@ -98,6 +105,8 @@ class AudioInput:
             self._stream.close()
         finally:
             self._stream = None
+            with self._lock:
+                self._latest = None
 
     def read_latest(self) -> np.ndarray | None:
         with self._lock:
@@ -110,31 +119,38 @@ class AudioInput:
             self._tap = tap
 
     def _pick_sample_rate(self, device: dict[str, object]) -> int:
-        candidates: list[int] = []
-        default_rate = device.get("default_samplerate")
-        if default_rate is not None:
-            try:
-                rate = float(default_rate)
-            except (TypeError, ValueError):
-                rate = 0.0
-            if math.isfinite(rate) and rate > 0:
-                candidates.append(int(round(rate)))
+        for rate in self._sample_rate_candidates(device):
+            if self._supports_sample_rate(self._coerce_device_index(device), rate):
+                return rate
+        return int(self._cfg.sample_rate)
 
-        candidates.extend((int(self._cfg.sample_rate), 48_000, 44_100))
+    def _sample_rate_candidates(self, device: dict[str, object] | None) -> list[int]:
+        candidates: list[int] = []
+        if device is not None:
+            default_rate = device.get("default_samplerate")
+            if default_rate is not None:
+                try:
+                    rate = float(default_rate)
+                except (TypeError, ValueError):
+                    rate = 0.0
+                if math.isfinite(rate) and rate > 0:
+                    candidates.append(int(round(rate)))
+
+        candidates.extend((self._sample_rate, int(self._cfg.sample_rate), 48_000, 44_100))
 
         seen: set[int] = set()
+        supported: list[int] = []
         for rate in candidates:
             if rate <= 0 or rate in seen:
                 continue
             seen.add(rate)
-            if self._supports_sample_rate(rate):
-                return rate
-        return int(self._cfg.sample_rate)
+            supported.append(rate)
+        return supported
 
-    def _supports_sample_rate(self, sample_rate: int) -> bool:
+    def _supports_sample_rate(self, device: int | None, sample_rate: int) -> bool:
         try:
             sd.check_input_settings(
-                device=self._device,
+                device=device,
                 samplerate=sample_rate,
                 channels=self._cfg.channels,
                 dtype="float32",
@@ -143,7 +159,82 @@ class AudioInput:
             return False
         return True
 
-    def _coerce_device_index(self, device: dict[str, object]) -> int | None:
+    def _iter_open_settings(self) -> list[tuple[int | None, int]]:
+        settings: list[tuple[int | None, int]] = []
+        seen: set[tuple[int | None, int]] = set()
+        for device_info in self._candidate_input_devices():
+            device = self._coerce_device_index(device_info)
+            for sample_rate in self._sample_rate_candidates(device_info):
+                if not self._supports_sample_rate(device, sample_rate):
+                    continue
+                key = (device, sample_rate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                settings.append(key)
+        if settings:
+            return settings
+        return [(self._device, self._sample_rate)]
+
+    def _candidate_input_devices(self) -> list[dict[str, object] | None]:
+        candidates: list[dict[str, object] | None] = []
+        if self._device is not None:
+            candidates.append(
+                {
+                    "index": self._device,
+                    "default_samplerate": float(self._sample_rate),
+                }
+            )
+        default_device = self._resolve_default_input_device()
+        if default_device is not None:
+            candidates.append(default_device)
+        candidates.extend(self._list_input_devices())
+        if not candidates:
+            return [None]
+
+        deduped: list[dict[str, object] | None] = []
+        seen_devices: set[int | None] = set()
+        for device in candidates:
+            device_index = self._coerce_device_index(device)
+            if device_index in seen_devices:
+                continue
+            seen_devices.add(device_index)
+            deduped.append(device)
+        return deduped
+
+    def _resolve_default_input_device(self) -> dict[str, object] | None:
+        try:
+            device = sd.query_devices(kind="input")
+        except Exception:
+            device = None
+        if isinstance(device, dict):
+            return device
+        devices = self._list_input_devices()
+        if devices:
+            return devices[0]
+        return None
+
+    def _list_input_devices(self) -> list[dict[str, object]]:
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return []
+        inputs: list[dict[str, object]] = []
+        for device in devices:
+            if not isinstance(device, dict):
+                continue
+            max_input_channels = device.get("max_input_channels")
+            try:
+                channel_count = int(max_input_channels)
+            except (TypeError, ValueError):
+                channel_count = 0
+            if channel_count > 0:
+                inputs.append(device)
+        return inputs
+
+    def _coerce_device_index(self, device: dict[str, object] | None) -> int | None:
+        if device is None:
+            return None
         index = device.get("index")
         if index is None:
             return None

@@ -19,18 +19,12 @@ def test_audio_input_uses_default_input_sample_rate(monkeypatch: pytest.MonkeyPa
 
 
 def test_audio_input_retries_with_refreshed_device(monkeypatch: pytest.MonkeyPatch) -> None:
-    devices = iter(
-        (
-            {"index": 7, "default_samplerate": 44_100.0},
-            {"index": 9, "default_samplerate": 48_000.0},
-        )
-    )
-
     def fake_query_devices(kind="input"):
-        try:
-            return next(devices)
-        except StopIteration:
-            return {"index": 9, "default_samplerate": 48_000.0}
+        if kind is None:
+            return [
+                {"index": 7, "default_samplerate": 44_100.0, "max_input_channels": 1},
+            ]
+        return {"index": 7, "default_samplerate": 44_100.0}
 
     created: list[dict[str, object]] = []
 
@@ -59,16 +53,74 @@ def test_audio_input_retries_with_refreshed_device(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(audio_mod.sd, "query_devices", fake_query_devices)
     monkeypatch.setattr(audio_mod.sd, "check_input_settings", lambda **kwargs: None)
     monkeypatch.setattr(audio_mod.sd, "InputStream", fake_input_stream)
+    monkeypatch.setattr(audio_mod.time, "sleep", lambda _: None)
 
     audio = audio_mod.AudioInput()
     audio.start()
 
-    assert audio.sample_rate == 48_000
     assert len(created) == 2
     assert created[0]["device"] == 7
     assert created[0]["samplerate"] == 44_100
-    assert created[1]["device"] == 9
+    assert created[1]["device"] == 7
     assert created[1]["samplerate"] == 48_000
+    assert audio.sample_rate == 48_000
     assert audio.is_running
 
     audio.stop()
+
+
+def test_audio_input_falls_back_to_other_input_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    input_devices = [
+        {
+            "name": "USB Mic",
+            "index": 7,
+            "default_samplerate": 48_000.0,
+            "max_input_channels": 2,
+        },
+        {
+            "name": "MacBook Pro Microphone",
+            "index": 9,
+            "default_samplerate": 44_100.0,
+            "max_input_channels": 1,
+        },
+    ]
+
+    created: list[dict[str, object]] = []
+
+    class DummyStream:
+        def __init__(self, params: dict[str, object]) -> None:
+            self._params = params
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_query_devices(kind=None):
+        if kind == "input":
+            return input_devices[0]
+        return input_devices
+
+    def fake_input_stream(**kwargs):
+        created.append(kwargs)
+        if kwargs["device"] == 7:
+            raise audio_mod.sd.PortAudioError("invalid property", -9986)
+        return DummyStream(kwargs)
+
+    monkeypatch.setattr(audio_mod.sd, "query_devices", fake_query_devices)
+    monkeypatch.setattr(audio_mod.sd, "check_input_settings", lambda **kwargs: None)
+    monkeypatch.setattr(audio_mod.sd, "InputStream", fake_input_stream)
+    monkeypatch.setattr(audio_mod.time, "sleep", lambda _: None)
+
+    audio = audio_mod.AudioInput()
+    audio.start()
+
+    assert created[0]["device"] == 7
+    assert created[-1]["device"] == 9
+    assert created[-1]["samplerate"] == 44_100
+    assert audio.sample_rate == 44_100
+    assert audio.is_running
