@@ -18,7 +18,9 @@ class AudioInputConfig:
 
 
 class AudioInput:
-    _OPEN_RETRY_DELAYS = (0.0, 0.15, 0.35)
+    _PORTAUDIO_RESET_RETRY_DELAYS = (0.2, 0.8)
+    _RECOVERABLE_PA_ERROR_CODES = frozenset({-9986, -9985, -9999})
+    _RECOVERABLE_COREAUDIO_ERROR_CODES = frozenset({-10851})
 
     def __init__(self, config: AudioInputConfig | None = None) -> None:
         self._cfg = config or AudioInputConfig()
@@ -73,27 +75,22 @@ class AudioInput:
         with self._lock:
             self._latest = None
 
-        for retry_delay in self._OPEN_RETRY_DELAYS:
+        last_exc = self._open_input_stream(callback)
+        if last_exc is None:
+            return
+
+        if not self._should_reset_portaudio(last_exc):
+            raise last_exc
+
+        for retry_delay in self._PORTAUDIO_RESET_RETRY_DELAYS:
             if retry_delay > 0:
                 time.sleep(retry_delay)
-            self.refresh_default_input(force=True)
-            for device, sample_rate in self._iter_open_settings():
-                try:
-                    self._stream = sd.InputStream(
-                        device=device,
-                        samplerate=sample_rate,
-                        channels=self._cfg.channels,
-                        blocksize=self._cfg.block_size,
-                        dtype="float32",
-                        callback=callback,
-                    )
-                    self._stream.start()
-                    self._device = device
-                    self._sample_rate = sample_rate
-                    return
-                except Exception as exc:
-                    last_exc = exc
-                    self._stream = None
+            self._reset_portaudio()
+            last_exc = self._open_input_stream(callback)
+            if last_exc is None:
+                return
+            if not self._should_reset_portaudio(last_exc):
+                break
         if last_exc is not None:
             raise last_exc
 
@@ -117,6 +114,73 @@ class AudioInput:
     def set_tap(self, tap: Callable[[np.ndarray], None] | None) -> None:
         with self._lock:
             self._tap = tap
+
+    def _open_input_stream(self, callback: Callable[..., None]) -> Exception | None:
+        last_exc: Exception | None = None
+        self.refresh_default_input(force=True)
+        for device, sample_rate in self._iter_open_settings():
+            try:
+                self._stream = sd.InputStream(
+                    device=device,
+                    samplerate=sample_rate,
+                    channels=self._cfg.channels,
+                    blocksize=self._cfg.block_size,
+                    dtype="float32",
+                    callback=callback,
+                )
+                self._stream.start()
+                self._device = device
+                self._sample_rate = sample_rate
+                return None
+            except Exception as exc:
+                last_exc = exc
+                self._stream = None
+        return last_exc
+
+    def _should_reset_portaudio(self, exc: Exception) -> bool:
+        if not isinstance(exc, sd.PortAudioError):
+            return False
+        pa_error_code = exc.args[1] if len(exc.args) > 1 else None
+        if pa_error_code in self._RECOVERABLE_PA_ERROR_CODES:
+            return True
+        if len(exc.args) > 2:
+            host_error = exc.args[2]
+            if (
+                isinstance(host_error, tuple)
+                and len(host_error) >= 2
+                and host_error[1] in self._RECOVERABLE_COREAUDIO_ERROR_CODES
+            ):
+                return True
+        return "internal portaudio error" in str(exc).lower()
+
+    def _reset_portaudio(self) -> None:
+        try:
+            sd.stop()
+        except Exception:
+            pass
+
+        terminate = getattr(sd, "_terminate", None)
+        initialize = getattr(sd, "_initialize", None)
+        initialized = getattr(sd, "_initialized", 0)
+        if callable(terminate):
+            try:
+                while isinstance(initialized, int) and initialized > 0:
+                    terminate()
+                    initialized = getattr(sd, "_initialized", 0)
+            except Exception:
+                pass
+        if callable(initialize):
+            try:
+                initialize()
+            except Exception:
+                pass
+
+        default_reset = getattr(getattr(sd, "default", None), "reset", None)
+        if callable(default_reset):
+            try:
+                default_reset()
+            except Exception:
+                pass
 
     def _pick_sample_rate(self, device: dict[str, object]) -> int:
         for rate in self._sample_rate_candidates(device):

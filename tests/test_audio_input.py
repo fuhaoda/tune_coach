@@ -124,3 +124,74 @@ def test_audio_input_falls_back_to_other_input_device(monkeypatch: pytest.Monkey
     assert created[-1]["samplerate"] == 44_100
     assert audio.sample_rate == 44_100
     assert audio.is_running
+
+
+def test_audio_input_reinitializes_portaudio_after_internal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[dict[str, object]] = []
+    resets: list[str] = []
+    recovered = {"ready": False}
+
+    class DummyStream:
+        def __init__(self, params: dict[str, object]) -> None:
+            self._params = params
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class DummyDefault:
+        def reset(self) -> None:
+            resets.append("default.reset")
+
+    def fake_query_devices(kind="input"):
+        if kind is None:
+            return [
+                {"index": 9, "default_samplerate": 44_100.0, "max_input_channels": 1},
+            ]
+        return {"index": 9, "default_samplerate": 44_100.0}
+
+    def fake_input_stream(**kwargs):
+        created.append(kwargs)
+        if not recovered["ready"]:
+            raise audio_mod.sd.PortAudioError(
+                "boom",
+                -9986,
+                (0, -10851, "Audio Unit: Invalid Property Value"),
+            )
+        return DummyStream(kwargs)
+
+    def fake_terminate() -> None:
+        resets.append("_terminate")
+        monkeypatch.setattr(audio_mod.sd, "_initialized", 0)
+
+    def fake_initialize() -> None:
+        resets.append("_initialize")
+        monkeypatch.setattr(audio_mod.sd, "_initialized", 1)
+        recovered["ready"] = True
+
+    monkeypatch.setattr(audio_mod.sd, "query_devices", fake_query_devices)
+    monkeypatch.setattr(audio_mod.sd, "check_input_settings", lambda **kwargs: None)
+    monkeypatch.setattr(audio_mod.sd, "InputStream", fake_input_stream)
+    monkeypatch.setattr(audio_mod.sd, "stop", lambda: resets.append("stop"))
+    monkeypatch.setattr(audio_mod.sd, "_terminate", fake_terminate)
+    monkeypatch.setattr(audio_mod.sd, "_initialize", fake_initialize)
+    monkeypatch.setattr(audio_mod.sd, "_initialized", 1)
+    monkeypatch.setattr(audio_mod.sd, "default", DummyDefault())
+    monkeypatch.setattr(audio_mod.time, "sleep", lambda _: None)
+
+    audio = audio_mod.AudioInput()
+    audio.start()
+
+    assert "_terminate" in resets
+    assert "_initialize" in resets
+    assert "default.reset" in resets
+    assert created[-1]["device"] == 9
+    assert created[-1]["samplerate"] == 44_100
+    assert audio.is_running
