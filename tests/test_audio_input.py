@@ -69,7 +69,9 @@ def test_audio_input_retries_with_refreshed_device(monkeypatch: pytest.MonkeyPat
     audio.stop()
 
 
-def test_audio_input_falls_back_to_other_input_device(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audio_input_limits_retries_to_current_default_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     input_devices = [
         {
             "name": "USB Mic",
@@ -86,6 +88,7 @@ def test_audio_input_falls_back_to_other_input_device(monkeypatch: pytest.Monkey
     ]
 
     created: list[dict[str, object]] = []
+    query_kinds: list[str | None] = []
 
     class DummyStream:
         def __init__(self, params: dict[str, object]) -> None:
@@ -101,29 +104,34 @@ def test_audio_input_falls_back_to_other_input_device(monkeypatch: pytest.Monkey
             return None
 
     def fake_query_devices(kind=None):
+        query_kinds.append(kind)
         if kind == "input":
             return input_devices[0]
         return input_devices
 
     def fake_input_stream(**kwargs):
         created.append(kwargs)
-        if kwargs["device"] == 7:
-            raise audio_mod.sd.PortAudioError("invalid property", -9986)
-        return DummyStream(kwargs)
+        raise audio_mod.sd.PortAudioError("invalid property", -9986)
 
     monkeypatch.setattr(audio_mod.sd, "query_devices", fake_query_devices)
     monkeypatch.setattr(audio_mod.sd, "check_input_settings", lambda **kwargs: None)
     monkeypatch.setattr(audio_mod.sd, "InputStream", fake_input_stream)
+    monkeypatch.setattr(audio_mod.sd, "stop", lambda: None)
+    monkeypatch.setattr(audio_mod.sd, "_terminate", lambda: None)
+    monkeypatch.setattr(audio_mod.sd, "_initialize", lambda: None)
+    monkeypatch.setattr(audio_mod.sd, "_initialized", 0)
+    monkeypatch.setattr(audio_mod.AudioInput, "_PORTAUDIO_RESET_RETRY_DELAYS", (0.0,))
     monkeypatch.setattr(audio_mod.time, "sleep", lambda _: None)
 
     audio = audio_mod.AudioInput()
-    audio.start()
+    with pytest.raises(audio_mod.sd.PortAudioError):
+        audio.start()
 
-    assert created[0]["device"] == 7
-    assert created[-1]["device"] == 9
-    assert created[-1]["samplerate"] == 44_100
-    assert audio.sample_rate == 44_100
-    assert audio.is_running
+    assert created
+    assert {entry["device"] for entry in created} == {7}
+    assert {entry["samplerate"] for entry in created} == {44_100, 48_000}
+    assert query_kinds
+    assert all(kind == "input" for kind in query_kinds)
 
 
 def test_audio_input_reinitializes_portaudio_after_internal_error(

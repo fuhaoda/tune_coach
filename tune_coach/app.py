@@ -429,8 +429,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recording_limit_samples = int(10 * sample_rate)
         self._processing_sample_rate = sample_rate
 
-    def _start_audio_input(self) -> bool:
-        if not self._audio.is_running:
+    def _start_audio_input(self, *, hard_reset: bool = False) -> bool:
+        if hard_reset:
+            self._audio.reset_backend()
+        elif not self._audio.is_running:
             self._audio.refresh_default_input(force=True)
         self._refresh_audio_pipeline()
         try:
@@ -451,6 +453,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_calibrate(self) -> None:
         if self._timer.isActive():
             self._stop_listening()
+        self._audio.reset_backend()
         self._refresh_audio_pipeline()
         self._set_status("Calibrating... sing Do now.", "info")
         QtWidgets.QApplication.processEvents()
@@ -480,7 +483,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_status("Calibrate or enter Do (Hz).", "error")
             return
 
-        if not self._start_audio_input():
+        if not self._start_audio_input(hard_reset=True):
             return
 
         self._reset_trace()
@@ -540,7 +543,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _resume_listening(self) -> None:
         if not self._paused:
             return
-        if not self._start_audio_input():
+        if not self._start_audio_input(hard_reset=True):
             return
         now = time.monotonic()
         if self._pause_time is not None and self._start_time is not None:

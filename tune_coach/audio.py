@@ -94,6 +94,11 @@ class AudioInput:
         if last_exc is not None:
             raise last_exc
 
+    def reset_backend(self) -> None:
+        self.stop()
+        self._reset_portaudio()
+        self.refresh_default_input(force=True)
+
     def stop(self) -> None:
         if self._stream is None:
             return
@@ -252,7 +257,6 @@ class AudioInput:
         default_device = self._resolve_default_input_device()
         if default_device is not None:
             candidates.append(default_device)
-        candidates.extend(self._list_input_devices())
         if not candidates:
             return [None]
 
