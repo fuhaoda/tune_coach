@@ -12,6 +12,7 @@ type Props = {
   nowSec: number
   onTogglePause?: () => void
   windowSeconds?: number
+  showTimeAxis?: boolean
 }
 
 const MAX_Y = 20
@@ -40,7 +41,8 @@ export default function PitchChart({
   showCentCurve,
   nowSec,
   onTogglePause,
-  windowSeconds = 24
+  windowSeconds = 24,
+  showTimeAxis = true
 }: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
@@ -66,14 +68,14 @@ export default function PitchChart({
     ctx.fillStyle = '#ffffff'
     ctx.fillRect(0, 0, width, height)
 
-    const plotArea = drawGrid(ctx, width, height, windowSeconds)
+    const plotArea = drawGrid(ctx, width, height, windowSeconds, showTimeAxis)
 
     const { minT, maxT } = computeTimeWindow(nowSec, windowSeconds)
     drawLine(ctx, points, minT, maxT, height, plotArea, 'y', 'rgba(27, 94, 154, 0.62)', 3.35)
     if (showCentCurve) {
       drawLine(ctx, points, minT, maxT, height, plotArea, 'centY', 'rgba(219, 143, 45, 0.95)', 1.9)
     }
-  }, [points, showCentCurve, nowSec, windowSeconds])
+  }, [points, showCentCurve, nowSec, windowSeconds, showTimeAxis])
 
   return (
     <canvas
@@ -91,26 +93,33 @@ function drawGrid(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  windowSeconds: number
-): { plotLeft: number; plotRight: number } {
+  windowSeconds: number,
+  showTimeAxis: boolean
+): { plotLeft: number; plotRight: number; bottomPadding: number } {
   const plotLeft = PLOT_LEFT_PADDING
   const plotRight = Math.max(plotLeft + 80, width - RIGHT_AXIS_WIDTH)
   const plotWidth = plotRight - plotLeft
-  const plotBottom = height - BOTTOM_PADDING - 6
+  const bottomPadding = showTimeAxis ? BOTTOM_PADDING : 6
+  const plotBottom = height - bottomPadding - 6
+  const verticalGrid = showTimeAxis ? 'rgba(0, 0, 0, 0.14)' : 'rgba(0, 0, 0, 0.66)'
+  const horizontalGrid = showTimeAxis ? 'rgba(0, 0, 0, 0.1)' : 'rgba(0, 0, 0, 0.34)'
+  const referenceGrid = showTimeAxis ? 'rgba(205, 93, 58, 0.58)' : 'rgba(205, 93, 58, 0.76)'
 
-  ctx.strokeStyle = 'rgba(0, 0, 0, 0.14)'
-  ctx.lineWidth = 1
+  ctx.strokeStyle = verticalGrid
+  ctx.lineWidth = showTimeAxis ? 1 : 1.8
   for (let second = 0; second <= windowSeconds; second += 1) {
-    const x = plotLeft + (second / windowSeconds) * plotWidth
+    const rawX = plotLeft + (second / windowSeconds) * plotWidth
+    const x = showTimeAxis ? rawX : Math.round(rawX) + 0.5
     ctx.beginPath()
     ctx.moveTo(x, 0)
     ctx.lineTo(x, plotBottom)
     ctx.stroke()
   }
 
-  ctx.strokeStyle = 'rgba(0, 0, 0, 0.1)'
+  ctx.strokeStyle = horizontalGrid
+  ctx.lineWidth = showTimeAxis ? 1 : 1.3
   for (let y = 0; y <= MAX_Y; y += 1) {
-    const py = yToPx(mapPitchYToDisplay(y), height)
+    const py = yToPx(mapPitchYToDisplay(y), height, bottomPadding)
     ctx.beginPath()
     ctx.moveTo(plotLeft, py)
     ctx.lineTo(plotRight, py)
@@ -118,10 +127,10 @@ function drawGrid(
   }
 
   const octaveSevens = [6, 13, 20]
-  ctx.strokeStyle = 'rgba(205, 93, 58, 0.58)'
-  ctx.lineWidth = 1.8
+  ctx.strokeStyle = referenceGrid
+  ctx.lineWidth = showTimeAxis ? 1.8 : 2
   for (const y of octaveSevens) {
-    const py = yToPx(mapPitchYToDisplay(y), height)
+    const py = yToPx(mapPitchYToDisplay(y), height, bottomPadding)
     ctx.beginPath()
     ctx.moveTo(plotLeft, py)
     ctx.lineTo(plotRight, py)
@@ -135,25 +144,29 @@ function drawGrid(
   ctx.lineTo(plotRight, plotBottom)
   ctx.stroke()
 
-  drawTimeAxis(ctx, plotLeft, plotRight, plotBottom, windowSeconds)
+  if (showTimeAxis) {
+    drawTimeAxis(ctx, plotLeft, plotRight, plotBottom, windowSeconds)
+  }
 
+  const axisFontSize = height < 420 ? 10 : 12
   ctx.fillStyle = '#444'
-  ctx.font = '12px "Avenir Next", "Segoe UI", sans-serif'
+  ctx.font = `${axisFontSize}px "Avenir Next", "Segoe UI", sans-serif`
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   const slotHeight = Math.abs(
-    yToPx(mapPitchYToDisplay(1), height) - yToPx(mapPitchYToDisplay(0), height)
+    yToPx(mapPitchYToDisplay(1), height, bottomPadding) -
+      yToPx(mapPitchYToDisplay(0), height, bottomPadding)
   )
   const labelX = plotRight + (width - plotRight) / 2
   for (let octave = 0; octave < 3; octave += 1) {
     for (let degree = 1; degree <= 7; degree += 1) {
       const rawY = octave * DEGREES_PER_OCTAVE + (degree - 1)
-      const py = yToPx(mapPitchYToDisplay(rawY), height)
+      const py = yToPx(mapPitchYToDisplay(rawY), height, bottomPadding)
       const label = String(degree)
       ctx.fillText(label, labelX, py)
       const metrics = ctx.measureText(label)
-      const ascent = metrics.actualBoundingBoxAscent || 8
-      const descent = metrics.actualBoundingBoxDescent || 3
+      const ascent = metrics.actualBoundingBoxAscent || axisFontSize * 0.7
+      const descent = metrics.actualBoundingBoxDescent || axisFontSize * 0.25
       const lowDotOffset = Math.min(slotHeight * 0.34, descent + 1.85)
       const highDotOffset = Math.min(slotHeight * 0.48, ascent + 3)
       ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)'
@@ -170,7 +183,7 @@ function drawGrid(
     }
   }
 
-  return { plotLeft, plotRight }
+  return { plotLeft, plotRight, bottomPadding }
 }
 
 function drawLine(
@@ -179,7 +192,7 @@ function drawLine(
   minT: number,
   maxT: number,
   height: number,
-  plotArea: { plotLeft: number; plotRight: number },
+  plotArea: { plotLeft: number; plotRight: number; bottomPadding: number },
   key: 'y' | 'centY',
   color: string,
   lineWidth: number
@@ -202,7 +215,7 @@ function drawLine(
     }
     const x =
       plotArea.plotLeft + ((p.t - minT) / Math.max(0.0001, maxT - minT)) * plotWidth
-    const y = yToPx(mapPitchYToDisplay(value), height)
+    const y = yToPx(mapPitchYToDisplay(value), height, plotArea.bottomPadding)
     if (!started) {
       ctx.moveTo(x, y)
       started = true
@@ -214,12 +227,12 @@ function drawLine(
   ctx.stroke()
 }
 
-function yToPx(displayY: number, height: number): number {
+function yToPx(displayY: number, height: number, bottomPadding = BOTTOM_PADDING): number {
   const maxDisplayY = mapPitchYToDisplay(MAX_Y)
   const minVisibleY = -0.5 - VISIBLE_MARGIN
   const maxVisibleY = maxDisplayY + 0.5 + VISIBLE_MARGIN
   const range = maxVisibleY - minVisibleY
-  return TOP_PADDING + ((maxVisibleY - displayY) / range) * (height - TOP_PADDING - BOTTOM_PADDING)
+  return TOP_PADDING + ((maxVisibleY - displayY) / range) * (height - TOP_PADDING - bottomPadding)
 }
 
 function drawTimeAxis(

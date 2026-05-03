@@ -38,6 +38,17 @@ class UiConfig:
     silence_timeout: float = 0.2
 
 
+@dataclass(frozen=True)
+class RecordingClip:
+    audio: np.ndarray
+    sample_rate: int
+    times: np.ndarray
+    ys: np.ndarray
+    cent_times: np.ndarray
+    cent_ys: np.ndarray
+    duration: float
+
+
 class MainWindow(QtWidgets.QMainWindow):
     status_signal = QtCore.Signal(str, str)
     _SHIFT_DIGIT_KEYS = {
@@ -88,8 +99,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recording_lock = threading.Lock()
         self._recorded_audio: np.ndarray | None = None
         self._recorded_audio_sample_rate: int | None = None
+        self._recording_trace_start_time: float | None = None
+        self._recorded_clip: RecordingClip | None = None
+        self._current_clip: RecordingClip | None = None
+        self._best_clip: RecordingClip | None = None
         self._play_thread: threading.Thread | None = None
         self._play_lock = threading.Lock()
+        self._clip_play_lock = threading.Lock()
+        self._clip_stream: sd.OutputStream | None = None
+        self._clip_play_slot: str | None = None
+        self._clip_play_audio: np.ndarray | None = None
+        self._clip_play_index = 0
+        self._clip_play_paused = False
+        self._clip_play_finished = False
         self._paused = False
         self._pause_time: float | None = None
         self._shift_digit_keys = dict(self._SHIFT_DIGIT_KEYS)
@@ -130,7 +152,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(16)  # ~60 FPS UI update
         self._timer.timeout.connect(self._on_tick)
+        self._clip_timer = QtCore.QTimer(self)
+        self._clip_timer.setInterval(50)
+        self._clip_timer.timeout.connect(self._on_clip_playback_tick)
         self._reset_second_lines()
+        self._draw_saved_clip("best")
+        self._draw_saved_clip("current")
+        self._update_clip_buttons()
         QtWidgets.QApplication.instance().installEventFilter(self)
         self._synth.set_instrument(self.instrument_combo.currentText())
         self._apply_do_hz(self._DEFAULT_DO_HZ)
@@ -142,6 +170,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_start.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
         self.btn_stop.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaStop))
         self.btn_play.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        self.btn_save_current.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogSaveButton))
+        replay_icon = getattr(
+            QtWidgets.QStyle.StandardPixmap,
+            "SP_MediaSkipBackward",
+            QtWidgets.QStyle.StandardPixmap.SP_MediaSeekBackward,
+        )
+        promote_icon = getattr(
+            QtWidgets.QStyle.StandardPixmap,
+            "SP_ArrowBack",
+            QtWidgets.QStyle.StandardPixmap.SP_ArrowLeft,
+        )
+        self.btn_best_replay.setIcon(style.standardIcon(replay_icon))
+        self.btn_best_play_pause.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        self.btn_current_replay.setIcon(style.standardIcon(replay_icon))
+        self.btn_current_play_pause.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        self.btn_current_promote.setIcon(style.standardIcon(promote_icon))
         record_icon = (
             QtWidgets.QStyle.StandardPixmap.SP_MediaRecord
             if hasattr(QtWidgets.QStyle.StandardPixmap, "SP_MediaRecord")
@@ -203,6 +247,30 @@ class MainWindow(QtWidgets.QMainWindow):
             base="#3f7acb",
             hover="#4a8fe6",
             border="#2f5fa0",
+        )
+        self._set_button_style(
+            self.btn_save_current,
+            base="#4f8f7a",
+            hover="#62aa92",
+            border="#3b715f",
+        )
+        for button in (
+            self.btn_best_replay,
+            self.btn_best_play_pause,
+            self.btn_current_replay,
+            self.btn_current_play_pause,
+        ):
+            self._set_button_style(
+                button,
+                base="#3f7acb",
+                hover="#4a8fe6",
+                border="#2f5fa0",
+            )
+        self._set_button_style(
+            self.btn_current_promote,
+            base="#7357b8",
+            hover="#856bd0",
+            border="#594192",
         )
 
     def _set_button_style(
@@ -302,7 +370,7 @@ class MainWindow(QtWidgets.QMainWindow):
         met_layout.addWidget(self.chk_metronome)
         met_layout.addWidget(self.spin_bpm)
         self.chk_cent_curve = QtWidgets.QCheckBox("Cent Curve")
-        self.chk_cent_curve.setChecked(False)
+        self.chk_cent_curve.setChecked(True)
         met_layout.addSpacing(12)
         met_layout.addWidget(self.chk_cent_curve)
         met_layout.addStretch(1)
@@ -323,16 +391,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fix_spinbox_style(self.spin_shift)
         self.btn_play = QtWidgets.QPushButton("Play")
         self.btn_play.setEnabled(False)
+        self.btn_save_current = QtWidgets.QPushButton("Save to Current")
+        self.btn_save_current.setEnabled(False)
 
         met_layout.addStretch(1)
         met_layout.addWidget(self.btn_record)
         met_layout.addSpacing(12)
         met_layout.addWidget(self.spin_shift)
         met_layout.addWidget(self.btn_play)
+        met_layout.addSpacing(8)
+        met_layout.addWidget(self.btn_save_current)
 
         self.btn_record.pressed.connect(self._on_record_start)
         self.btn_record.released.connect(self._on_record_stop)
         self.btn_play.clicked.connect(self._on_play)
+        self.btn_save_current.clicked.connect(self._on_save_current)
 
         status_layout = QtWidgets.QHBoxLayout()
         self.status = QtWidgets.QLabel("Calibrate or enter Do (Hz).")
@@ -384,8 +457,13 @@ class MainWindow(QtWidgets.QMainWindow):
         right_axis.setTickFont(QtGui.QFont("Helvetica", 12))
         right_axis.setWidth(60)
         self.plot.setYRange(-0.5, self._axis.max_y + 0.5)
+        self.plot.setMinimumHeight(420)
+        self.plot.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
 
-        layout.addWidget(self.plot, 1)
+        layout.addWidget(self.plot, 13)
 
         # Line breaks on silence via NaN (connect='finite'), points rendered separately.
         self._curve = self.plot.plot([], [], pen=pg.mkPen(color=(30, 90, 160), width=2), connect="finite")
@@ -398,19 +476,165 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cent_curve = self.plot.plot(
             [], [], pen=pg.mkPen(color=(255, 170, 60), width=2), connect="finite"
         )
-        self._cent_curve.setVisible(False)
+        self._cent_curve.setVisible(self.chk_cent_curve.isChecked())
 
         self._second_lines: list[pg.InfiniteLine] = []
         self._ref_lines: list[pg.InfiniteLine] = []
+
+        memory_layout = QtWidgets.QHBoxLayout()
+        memory_layout.setSpacing(16)
+        layout.addLayout(memory_layout, 7)
+
+        self.best_plot, self._best_curve, self._best_scatter, self._best_cent_curve = (
+            self._create_saved_plot()
+        )
+        self.current_plot, self._current_curve, self._current_scatter, self._current_cent_curve = (
+            self._create_saved_plot()
+        )
+        best_panel = QtWidgets.QFrame()
+        best_panel.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        best_panel_layout = QtWidgets.QVBoxLayout(best_panel)
+        best_panel_layout.setContentsMargins(0, 0, 0, 0)
+        best_header = QtWidgets.QHBoxLayout()
+        best_panel_layout.addLayout(best_header)
+        best_title = QtWidgets.QLabel("Best")
+        best_title.setStyleSheet("font-size: 22px; font-weight: bold; color: #f5f5f5;")
+        self.btn_best_replay = QtWidgets.QPushButton("Replay")
+        self.btn_best_play_pause = QtWidgets.QPushButton("Play")
+        best_header.addWidget(best_title)
+        best_header.addStretch(1)
+        best_header.addWidget(self.btn_best_replay)
+        best_header.addWidget(self.btn_best_play_pause)
+        best_panel_layout.addWidget(self.best_plot)
+
+        current_panel = QtWidgets.QFrame()
+        current_panel.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        current_panel_layout = QtWidgets.QVBoxLayout(current_panel)
+        current_panel_layout.setContentsMargins(0, 0, 0, 0)
+        current_header = QtWidgets.QHBoxLayout()
+        current_panel_layout.addLayout(current_header)
+        current_title = QtWidgets.QLabel("Current")
+        current_title.setStyleSheet("font-size: 22px; font-weight: bold; color: #f5f5f5;")
+        self.btn_current_replay = QtWidgets.QPushButton("Replay")
+        self.btn_current_play_pause = QtWidgets.QPushButton("Play")
+        self.btn_current_promote = QtWidgets.QPushButton("Promote to Best")
+        current_header.addWidget(current_title)
+        current_header.addStretch(1)
+        current_header.addWidget(self.btn_current_replay)
+        current_header.addWidget(self.btn_current_play_pause)
+        current_header.addWidget(self.btn_current_promote)
+        current_panel_layout.addWidget(self.current_plot)
+
+        self.btn_best_replay.clicked.connect(lambda: self._on_saved_clip_replay("best"))
+        self.btn_best_play_pause.clicked.connect(lambda: self._on_saved_clip_play_pause("best"))
+        self.btn_current_replay.clicked.connect(lambda: self._on_saved_clip_replay("current"))
+        self.btn_current_play_pause.clicked.connect(lambda: self._on_saved_clip_play_pause("current"))
+        self.btn_current_promote.clicked.connect(self._on_promote_current_to_best)
+
+        memory_layout.addWidget(best_panel, 1)
+        memory_layout.addWidget(current_panel, 1)
         self.setCentralWidget(root)
+
+    def _create_saved_plot(
+        self,
+    ) -> tuple[pg.PlotWidget, pg.PlotDataItem, pg.ScatterPlotItem, pg.PlotDataItem]:
+        plot = pg.PlotWidget()
+        plot.setBackground("w")
+        plot.showGrid(x=True, y=True, alpha=0.46)
+        plot.setMouseEnabled(x=False, y=False)
+        plot.setMenuEnabled(False)
+        plot.setMinimumHeight(150)
+        plot.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        plot_item = plot.getPlotItem()
+        plot_item.hideAxis("bottom")
+        plot_item.hideAxis("left")
+        plot_item.showAxis("right")
+        right_axis = plot_item.getAxis("right")
+        right_axis.setTicks([self._axis.ticks()])
+        right_axis.setStyle(tickTextOffset=10)
+        right_axis.setTickFont(QtGui.QFont("Helvetica", 10))
+        right_axis.setWidth(48)
+        plot.setYRange(-0.5, self._axis.max_y + 0.5)
+        plot.setXRange(-10.0, 0.0)
+
+        for second in range(11):
+            plot.addItem(
+                pg.InfiniteLine(
+                    pos=-10.0 + float(second),
+                    angle=90,
+                    pen=pg.mkPen(color=(0, 0, 0, 150), width=1.4),
+                )
+            )
+
+        for octave_index in (0, 1):
+            y = octave_index * (7 + self._axis._octave_gap) + 6
+            plot.addItem(
+                pg.InfiniteLine(
+                    pos=y,
+                    angle=0,
+                    pen=pg.mkPen(color=(210, 80, 80, 185), width=1.8),
+                )
+            )
+
+        curve = plot.plot([], [], pen=pg.mkPen(color=(30, 90, 160), width=2), connect="finite")
+        scatter = pg.ScatterPlotItem(
+            size=5,
+            brush=pg.mkBrush(30, 90, 160),
+            pen=pg.mkPen(color=(30, 90, 160), width=1),
+        )
+        plot.addItem(scatter)
+        cent_curve = plot.plot([], [], pen=pg.mkPen(color=(255, 170, 60), width=1.6), connect="finite")
+        return plot, curve, scatter, cent_curve
+
+    def _draw_saved_clip(self, slot: str) -> None:
+        clip = self._best_clip if slot == "best" else self._current_clip
+        plot, curve, scatter, cent_curve = (
+            (self.best_plot, self._best_curve, self._best_scatter, self._best_cent_curve)
+            if slot == "best"
+            else (self.current_plot, self._current_curve, self._current_scatter, self._current_cent_curve)
+        )
+        if clip is None:
+            curve.setData([], [])
+            scatter.setData([], [])
+            cent_curve.setData([], [])
+            plot.setXRange(-10.0, 0.0)
+            return
+
+        window_seconds = max(10.0, float(clip.duration))
+        plot.setXRange(-window_seconds, 0.0)
+
+        if clip.times.size:
+            x = clip.times.astype(np.float32, copy=False) - float(clip.duration)
+            y = clip.ys.astype(np.float32, copy=False)
+            curve.setData(x, y)
+            mask = np.isfinite(y)
+            if mask.any():
+                scatter.setData(x[mask], y[mask])
+            else:
+                scatter.setData([], [])
+        else:
+            curve.setData([], [])
+            scatter.setData([], [])
+
+        if clip.cent_times.size:
+            cx = clip.cent_times.astype(np.float32, copy=False) - float(clip.duration)
+            cy = clip.cent_ys.astype(np.float32, copy=False)
+            cent_curve.setData(cx, cy)
+        else:
+            cent_curve.setData([], [])
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         try:
             self._timer.stop()
+            self._clip_timer.stop()
             self._audio.stop()
             self._metronome.stop()
             self._synth.stop()
             self._stop_playback()
+            self._stop_saved_playback()
         finally:
             super().closeEvent(event)
 
@@ -497,6 +721,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_calibrate.setEnabled(False)
         self.btn_record.setEnabled(True)
         self.btn_play.setEnabled(self._recorded_audio is not None)
+        self.btn_save_current.setEnabled(self._recorded_clip is not None)
         self._set_status("Listening...", "info")
         self._timer.start()
 
@@ -523,7 +748,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer.stop()
         self._audio.stop()
         self._audio.set_tap(None)
-        self._stop_recording(cancel=True)
+        if self._recording:
+            self._stop_recording(cancel=True)
         self._stop_playback()
         self._metronome.stop()
         self.btn_record.setEnabled(False)
@@ -596,6 +822,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._recording_frames.clear()
             self._recording_samples = 0
         self._recording_limit_hit = False
+        self._recorded_clip = None
+        self.btn_save_current.setEnabled(False)
+        self._recording_trace_start_time = self._session_elapsed()
         self._recording = True
         self._audio.set_tap(self._record_tap)
         self._set_status("Recording...", "info")
@@ -615,6 +844,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._recording_samples = 0
             self._recorded_audio = None
             self._recorded_audio_sample_rate = None
+            self._recorded_clip = None
+            self._recording_trace_start_time = None
+            self.btn_save_current.setEnabled(False)
             return
         with self._recording_lock:
             frames = list(self._recording_frames)
@@ -623,12 +855,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if not frames:
             self._recorded_audio = None
             self._recorded_audio_sample_rate = None
+            self._recorded_clip = None
+            self._recording_trace_start_time = None
             self._set_status("Listening...", "info")
             self.btn_play.setEnabled(False)
+            self.btn_save_current.setEnabled(False)
             return
         self._recorded_audio = np.concatenate(frames).astype(np.float32, copy=False)
         self._recorded_audio_sample_rate = self._audio.sample_rate
+        trace_start_time = self._recording_trace_start_time
+        trace_end_time = self._session_elapsed()
+        self._recorded_clip = self._build_recording_clip(
+            self._recorded_audio,
+            int(self._recorded_audio_sample_rate),
+            trace_start_time,
+            trace_end_time,
+        )
+        self._recording_trace_start_time = None
         self.btn_play.setEnabled(True)
+        self.btn_save_current.setEnabled(self._recorded_clip is not None)
         self._set_status("Listening...", "info")
 
     def _record_tap(self, frame: np.ndarray) -> None:
@@ -640,6 +885,102 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._recording_samples >= self._recording_limit_samples:
                 self._recording_limit_hit = True
 
+    def _session_elapsed(self) -> float:
+        if self._start_time is None:
+            return 0.0
+        return max(0.0, time.monotonic() - self._start_time)
+
+    def _build_recording_clip(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        start_time: float | None,
+        end_time: float,
+    ) -> RecordingClip:
+        duration = max(float(audio.size) / max(1, sample_rate), 0.001)
+        if start_time is None:
+            start_time = max(0.0, end_time - duration)
+        duration = max(duration, max(0.001, end_time - start_time))
+        end_time = start_time + duration
+
+        times, ys = self._trace_snapshot(self._times, self._ys, self._buffer, start_time, end_time)
+        cent_times, cent_ys = self._trace_snapshot(
+            self._cent_times,
+            self._cent_ys,
+            self._cent_buffer,
+            start_time,
+            end_time,
+        )
+        return RecordingClip(
+            audio=audio.copy(),
+            sample_rate=int(sample_rate),
+            times=times,
+            ys=ys,
+            cent_times=cent_times,
+            cent_ys=cent_ys,
+            duration=duration,
+        )
+
+    def _trace_snapshot(
+        self,
+        times: list[float],
+        values: list[float],
+        buffered: deque,
+        start_time: float,
+        end_time: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        pairs = [(float(t), float(v)) for t, v in zip(times, values)]
+        pairs.extend((float(t), float(v)) for t, v in buffered)
+        if not pairs:
+            return np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+        pairs.sort(key=lambda item: item[0])
+        filtered = [
+            (max(0.0, t - start_time), v)
+            for t, v in pairs
+            if start_time <= t <= end_time
+        ]
+        if not filtered:
+            return np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+        out_times = np.array([t for t, _ in filtered], dtype=np.float32)
+        out_values = np.array([v for _, v in filtered], dtype=np.float32)
+        return out_times, out_values
+
+    def _clone_clip(self, clip: RecordingClip) -> RecordingClip:
+        return RecordingClip(
+            audio=clip.audio.copy(),
+            sample_rate=clip.sample_rate,
+            times=clip.times.copy(),
+            ys=clip.ys.copy(),
+            cent_times=clip.cent_times.copy(),
+            cent_ys=clip.cent_ys.copy(),
+            duration=float(clip.duration),
+        )
+
+    def _on_save_current(self) -> None:
+        if self._recorded_clip is None:
+            self._set_status("Record something first.", "error")
+            return
+        if self._clip_play_slot == "current":
+            self._stop_saved_playback()
+        self._current_clip = self._clone_clip(self._recorded_clip)
+        self._draw_saved_clip("current")
+        if self._best_clip is None:
+            self._best_clip = self._clone_clip(self._current_clip)
+            self._draw_saved_clip("best")
+        self._update_clip_buttons()
+        self._set_status("Saved to Current", "info")
+
+    def _on_promote_current_to_best(self) -> None:
+        if self._current_clip is None:
+            self._set_status("Save a Current recording first.", "error")
+            return
+        if self._clip_play_slot == "best":
+            self._stop_saved_playback()
+        self._best_clip = self._clone_clip(self._current_clip)
+        self._draw_saved_clip("best")
+        self._update_clip_buttons()
+        self._set_status("Promoted Current to Best", "info")
+
     def _on_play(self) -> None:
         if not self._timer.isActive():
             self._set_status("Press Start before playback.", "error")
@@ -650,6 +991,7 @@ class MainWindow(QtWidgets.QMainWindow):
         with self._play_lock:
             if self._play_thread is not None and self._play_thread.is_alive():
                 return
+            self._stop_saved_playback()
             self._set_status("Processing...", "info")
             audio = self._recorded_audio.copy()
             sample_rate = int(self._recorded_audio_sample_rate or self._audio.sample_rate)
@@ -765,6 +1107,161 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _stop_playback(self) -> None:
         sd.stop()
+
+    def _on_saved_clip_replay(self, slot: str) -> None:
+        clip = self._clip_for_slot(slot)
+        if clip is None:
+            self._set_status("No saved recording in this slot.", "error")
+            return
+        self._start_saved_playback(slot, clip, restart=True)
+
+    def _on_saved_clip_play_pause(self, slot: str) -> None:
+        clip = self._clip_for_slot(slot)
+        if clip is None:
+            self._set_status("No saved recording in this slot.", "error")
+            return
+        with self._clip_play_lock:
+            if self._clip_play_slot == slot and self._clip_stream is not None:
+                self._clip_play_paused = not self._clip_play_paused
+                paused = self._clip_play_paused
+            else:
+                paused = False
+        if self._clip_play_slot == slot and self._clip_stream is not None and paused:
+            self._set_status(f"{slot.title()} playback paused", "info")
+            self._update_clip_buttons()
+            return
+        if self._clip_play_slot == slot and self._clip_stream is not None and not paused:
+            self._set_status(f"Playing {slot.title()}", "info")
+            self._update_clip_buttons()
+            return
+        self._start_saved_playback(slot, clip, restart=False)
+
+    def _clip_for_slot(self, slot: str) -> RecordingClip | None:
+        return self._best_clip if slot == "best" else self._current_clip
+
+    def _start_saved_playback(self, slot: str, clip: RecordingClip, *, restart: bool) -> None:
+        self._stop_playback()
+        self._stop_saved_playback(clear_status=False)
+        audio = clip.audio.astype(np.float32, copy=True)
+        if audio.size == 0:
+            self._set_status("Saved recording is empty.", "error")
+            return
+        if audio.ndim != 1:
+            audio = np.reshape(audio, (-1,)).astype(np.float32, copy=False)
+        audio = self._apply_fade(audio, ms=4.0, sample_rate=clip.sample_rate)
+
+        with self._clip_play_lock:
+            self._clip_play_slot = slot
+            self._clip_play_audio = audio
+            self._clip_play_index = 0 if restart else min(self._clip_play_index, audio.size - 1)
+            self._clip_play_paused = False
+            self._clip_play_finished = False
+
+        def callback(outdata, frames, _time_info, _status) -> None:
+            outdata.fill(0)
+            with self._clip_play_lock:
+                if (
+                    self._clip_play_paused
+                    or self._clip_play_audio is None
+                    or self._clip_play_slot != slot
+                ):
+                    return
+                start = self._clip_play_index
+                end = min(start + frames, int(self._clip_play_audio.size))
+                chunk = self._clip_play_audio[start:end]
+                if chunk.size:
+                    outdata[: chunk.size, 0] = chunk
+                self._clip_play_index = end
+                if end >= int(self._clip_play_audio.size):
+                    self._clip_play_finished = True
+
+        try:
+            stream = sd.OutputStream(
+                samplerate=int(clip.sample_rate),
+                channels=1,
+                dtype="float32",
+                callback=callback,
+            )
+            with self._clip_play_lock:
+                self._clip_stream = stream
+            stream.start()
+            self._clip_timer.start()
+            self._set_status(f"Playing {slot.title()}", "info")
+        except Exception as exc:  # noqa: BLE001 - user-facing
+            with self._clip_play_lock:
+                self._clip_stream = None
+                self._clip_play_slot = None
+                self._clip_play_audio = None
+                self._clip_play_index = 0
+                self._clip_play_paused = False
+                self._clip_play_finished = False
+            self._set_status(f"Playback failed: {exc}", "error")
+        self._update_clip_buttons()
+
+    def _stop_saved_playback(self, *, clear_status: bool = True) -> None:
+        with self._clip_play_lock:
+            stream = self._clip_stream
+            self._clip_stream = None
+            self._clip_play_slot = None
+            self._clip_play_audio = None
+            self._clip_play_index = 0
+            self._clip_play_paused = False
+            self._clip_play_finished = False
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
+        if self._clip_stream is None:
+            self._clip_timer.stop()
+        if clear_status:
+            if self._timer.isActive():
+                self._set_status("Listening...", "info")
+            else:
+                self._set_status("Ready to listen", "ready")
+        self._update_clip_buttons()
+
+    def _on_clip_playback_tick(self) -> None:
+        with self._clip_play_lock:
+            finished = self._clip_play_finished
+            slot = self._clip_play_slot
+        if not finished:
+            return
+        self._stop_saved_playback(clear_status=False)
+        if slot is not None:
+            self._set_status(f"{slot.title()} playback finished", "info")
+
+    def _update_clip_buttons(self) -> None:
+        has_best = self._best_clip is not None
+        has_current = self._current_clip is not None
+        self.btn_best_replay.setEnabled(has_best)
+        self.btn_best_play_pause.setEnabled(has_best)
+        self.btn_current_replay.setEnabled(has_current)
+        self.btn_current_play_pause.setEnabled(has_current)
+        self.btn_current_promote.setEnabled(has_current)
+        self.btn_save_current.setEnabled(self._recorded_clip is not None)
+
+        with self._clip_play_lock:
+            slot = self._clip_play_slot
+            paused = self._clip_play_paused
+            active = self._clip_stream is not None
+
+        for button, button_slot in (
+            (self.btn_best_play_pause, "best"),
+            (self.btn_current_play_pause, "current"),
+        ):
+            if active and slot == button_slot:
+                button.setText("Resume" if paused else "Pause")
+                icon = (
+                    QtWidgets.QStyle.StandardPixmap.SP_MediaPlay
+                    if paused
+                    else QtWidgets.QStyle.StandardPixmap.SP_MediaPause
+                )
+            else:
+                button.setText("Play")
+                icon = QtWidgets.QStyle.StandardPixmap.SP_MediaPlay
+            button.setIcon(self.style().standardIcon(icon))
 
     def _on_tuning_change(self, text: str) -> None:
         tuning = self._parse_tuning(text)
@@ -898,8 +1395,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer.stop()
         self._audio.stop()
         self._audio.set_tap(None)
-        self._stop_recording(cancel=True)
+        if self._recording:
+            self._stop_recording(cancel=True)
         self._stop_playback()
+        self._stop_saved_playback(clear_status=False)
         self._paused = False
         self._pause_time = None
         self.btn_start.setEnabled(self._quantizer is not None)
@@ -909,6 +1408,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_calibrate.setEnabled(True)
         self.btn_record.setEnabled(False)
         self.btn_play.setEnabled(False)
+        self.btn_save_current.setEnabled(self._recorded_clip is not None)
         if self._quantizer is None:
             self._set_status("Calibrate or enter Do (Hz).", "error")
         else:
@@ -1249,6 +1749,11 @@ class MainWindow(QtWidgets.QMainWindow):
 def main() -> None:
     app = QtWidgets.QApplication(sys.argv)
     win = MainWindow()
-    win.resize(1800, 650)
+    screen = app.primaryScreen()
+    if screen is not None:
+        available = screen.availableGeometry()
+        win.resize(min(1800, int(available.width() * 0.96)), min(1000, int(available.height() * 0.94)))
+    else:
+        win.resize(1600, 900)
     win.show()
     sys.exit(app.exec())

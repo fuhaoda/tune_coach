@@ -14,6 +14,16 @@ type PitchPoint = {
   hz: number | null
 }
 
+type SavedClip = {
+  id: number
+  audio: Float32Array
+  sampleRate: number
+  points: PitchPoint[]
+  duration: number
+}
+
+type ClipSlot = 'best' | 'current'
+
 type ServerEvent = {
   type: string
   [key: string]: unknown
@@ -91,6 +101,10 @@ function bridgeShortGap(points: PitchPoint[], maxGapSec: number): PitchPoint[] {
   return next
 }
 
+function clipSlotLabel(slot: ClipSlot): string {
+  return slot === 'best' ? 'Best' : 'Current'
+}
+
 export default function App(): JSX.Element {
   const [status, setStatus] = useState('Ready to listen')
   const [connected, setConnected] = useState(false)
@@ -102,14 +116,22 @@ export default function App(): JSX.Element {
   const [keySemitone, setKeySemitone] = useState(0)
   const [instrument, setInstrument] = useState<Instrument>('Guitar')
 
-  const [centCurve, setCentCurve] = useState(false)
+  const [centCurve, setCentCurve] = useState(true)
   const [metronomeEnabled, setMetronomeEnabled] = useState(false)
   const [bpm, setBpm] = useState(96)
 
   const [shiftSteps, setShiftSteps] = useState(0)
   const [isRecording, setIsRecording] = useState(false)
   const [hasRecording, setHasRecording] = useState(false)
+  const [hasPendingClip, setHasPendingClip] = useState(false)
   const [playing, setPlaying] = useState(false)
+  const [currentClip, setCurrentClip] = useState<SavedClip | null>(null)
+  const [bestClip, setBestClip] = useState<SavedClip | null>(null)
+  const [clipPlayback, setClipPlayback] = useState<{
+    slot: ClipSlot | null
+    playing: boolean
+    paused: boolean
+  }>({ slot: null, playing: false, paused: false })
 
   const [shiftPressed, setShiftPressed] = useState(false)
   const [controlPressed, setControlPressed] = useState(false)
@@ -130,7 +152,11 @@ export default function App(): JSX.Element {
   const recordingRef = useRef(false)
   const recordedChunksRef = useRef<Float32Array[]>([])
   const recordedClipRef = useRef<Float32Array | null>(null)
+  const pendingClipRef = useRef<SavedClip | null>(null)
+  const recordStartSecRef = useRef(0)
+  const nextClipIdRef = useRef(1)
   const sampleRateRef = useRef(44_100)
+  const pointsRef = useRef<PitchPoint[]>([])
 
   const metronomeTimerRef = useRef<number | null>(null)
   const chartRafRef = useRef<number | null>(null)
@@ -141,6 +167,14 @@ export default function App(): JSX.Element {
   const lastActivityAtMsRef = useRef(performance.now())
 
   const activeNotesRef = useRef<Map<string, { osc: OscillatorNode; gain: GainNode }>>(new Map())
+  const clipSourceRef = useRef<AudioBufferSourceNode | null>(null)
+  const clipPlaybackRef = useRef<{
+    slot: ClipSlot | null
+    playing: boolean
+    paused: boolean
+    offset: number
+    startedAt: number
+  }>({ slot: null, playing: false, paused: false, offset: 0, startedAt: 0 })
 
   const sendJson = useCallback((payload: object) => {
     const ws = wsRef.current
@@ -177,6 +211,7 @@ export default function App(): JSX.Element {
 
   const resetTrace = useCallback(() => {
     setPoints([])
+    pointsRef.current = []
     chartNowSecRef.current = 0
     setChartNowSec(0)
     serverTimeBaseRef.current = null
@@ -237,7 +272,9 @@ export default function App(): JSX.Element {
         while (firstValid < next.length && next[firstValid].t < minT) {
           firstValid += 1
         }
-        return next.slice(firstValid)
+        const trimmed = next.slice(firstValid)
+        pointsRef.current = trimmed
+        return trimmed
       })
     }
   }, [markUserActivity])
@@ -379,6 +416,164 @@ export default function App(): JSX.Element {
     note.osc.stop(now + 0.1)
     activeNotesRef.current.delete(noteId)
   }, [])
+
+  const cloneSavedClip = useCallback((clip: SavedClip): SavedClip => {
+    return {
+      id: nextClipIdRef.current,
+      audio: new Float32Array(clip.audio),
+      sampleRate: clip.sampleRate,
+      points: clip.points.map((point) => ({ ...point })),
+      duration: clip.duration
+    }
+  }, [])
+
+  const setSavedPlaybackState = useCallback(
+    (state: { slot: ClipSlot | null; playing: boolean; paused: boolean; offset: number; startedAt: number }) => {
+      clipPlaybackRef.current = state
+      setClipPlayback({ slot: state.slot, playing: state.playing, paused: state.paused })
+    },
+    []
+  )
+
+  const stopSavedPlayback = useCallback(
+    (resetState = true) => {
+      const source = clipSourceRef.current
+      if (source) {
+        source.onended = null
+        try {
+          source.stop()
+        } catch {
+          // The source may have already ended.
+        }
+        source.disconnect()
+      }
+      clipSourceRef.current = null
+      if (resetState) {
+        setSavedPlaybackState({ slot: null, playing: false, paused: false, offset: 0, startedAt: 0 })
+      }
+    },
+    [setSavedPlaybackState]
+  )
+
+  const getSavedClip = useCallback(
+    (slot: ClipSlot): SavedClip | null => {
+      return slot === 'best' ? bestClip : currentClip
+    },
+    [bestClip, currentClip]
+  )
+
+  const startSavedPlayback = useCallback(
+    async (slot: ClipSlot, clip: SavedClip, offsetSec = 0) => {
+      if (clip.audio.length === 0) {
+        setStatus('Saved recording is empty')
+        return
+      }
+      const ctx = await ensureAudioContext()
+      stopSavedPlayback(false)
+      const buffer = ctx.createBuffer(1, clip.audio.length, clip.sampleRate)
+      buffer.copyToChannel(clip.audio, 0)
+      const source = ctx.createBufferSource()
+      source.buffer = buffer
+      source.connect(ctx.destination)
+      const safeOffset = Math.max(0, Math.min(offsetSec, Math.max(0, clip.duration - 0.001)))
+      const label = clipSlotLabel(slot)
+      clipSourceRef.current = source
+      setSavedPlaybackState({
+        slot,
+        playing: true,
+        paused: false,
+        offset: safeOffset,
+        startedAt: ctx.currentTime - safeOffset
+      })
+      source.onended = () => {
+        if (clipSourceRef.current !== source) {
+          return
+        }
+        source.disconnect()
+        clipSourceRef.current = null
+        setSavedPlaybackState({ slot: null, playing: false, paused: false, offset: 0, startedAt: 0 })
+        setStatus(`${label} playback finished`)
+      }
+      source.start(0, safeOffset)
+      setStatus(`Playing ${label}`)
+    },
+    [ensureAudioContext, setSavedPlaybackState, stopSavedPlayback]
+  )
+
+  const replaySavedClip = useCallback(
+    async (slot: ClipSlot) => {
+      const clip = getSavedClip(slot)
+      if (!clip) {
+        setStatus('No saved recording in this slot')
+        return
+      }
+      await startSavedPlayback(slot, clip, 0)
+    },
+    [getSavedClip, startSavedPlayback]
+  )
+
+  const toggleSavedClipPlayback = useCallback(
+    async (slot: ClipSlot) => {
+      const clip = getSavedClip(slot)
+      if (!clip) {
+        setStatus('No saved recording in this slot')
+        return
+      }
+      const state = clipPlaybackRef.current
+      const label = clipSlotLabel(slot)
+      if (state.slot === slot && state.playing) {
+        const ctx = audioContextRef.current
+        const offset = ctx ? Math.min(clip.duration, Math.max(0, ctx.currentTime - state.startedAt)) : state.offset
+        stopSavedPlayback(false)
+        setSavedPlaybackState({
+          slot,
+          playing: false,
+          paused: true,
+          offset: offset >= clip.duration ? 0 : offset,
+          startedAt: 0
+        })
+        setStatus(`${label} playback paused`)
+        return
+      }
+      const offset = state.slot === slot && state.paused ? state.offset : 0
+      await startSavedPlayback(slot, clip, offset)
+    },
+    [getSavedClip, setSavedPlaybackState, startSavedPlayback, stopSavedPlayback]
+  )
+
+  const saveToCurrent = useCallback(() => {
+    const clip = pendingClipRef.current
+    if (!clip) {
+      setStatus('Record something first')
+      return
+    }
+    if (clipPlaybackRef.current.slot === 'current') {
+      stopSavedPlayback()
+    }
+    const nextCurrent = cloneSavedClip(clip)
+    nextClipIdRef.current += 1
+    setCurrentClip(nextCurrent)
+    if (!bestClip) {
+      const nextBest = cloneSavedClip(nextCurrent)
+      nextClipIdRef.current += 1
+      setBestClip(nextBest)
+    }
+    setStatus('Saved to Current')
+  }, [bestClip, cloneSavedClip, stopSavedPlayback])
+
+  const promoteCurrentToBest = useCallback(() => {
+    if (!currentClip) {
+      setStatus('Save a Current recording first')
+      return
+    }
+    if (clipPlaybackRef.current.slot === 'best') {
+      stopSavedPlayback()
+    }
+    const nextBest = cloneSavedClip(currentClip)
+    nextClipIdRef.current += 1
+    setBestClip(nextBest)
+    setStatus('Promoted Current to Best')
+  }, [cloneSavedClip, currentClip, stopSavedPlayback])
 
   const stopCaptureGraph = useCallback(() => {
     workletNodeRef.current?.disconnect()
@@ -524,6 +719,7 @@ export default function App(): JSX.Element {
     serverTimeBaseRef.current = null
     chartNowSecRef.current = 0
     setChartNowSec(0)
+    pointsRef.current = []
     setPoints([])
     setStatus('Ready to listen')
     sendJson({ type: 'calibrate_cancel' })
@@ -535,6 +731,11 @@ export default function App(): JSX.Element {
       return
     }
     recordedChunksRef.current = []
+    recordedClipRef.current = null
+    pendingClipRef.current = null
+    recordStartSecRef.current = chartNowSecRef.current
+    setHasRecording(false)
+    setHasPendingClip(false)
     recordingRef.current = true
     setIsRecording(true)
     setStatus('Recording...')
@@ -559,7 +760,26 @@ export default function App(): JSX.Element {
       offset += chunk.length
     }
     recordedClipRef.current = merged
+    const sampleRate = sampleRateRef.current
+    const audioDuration = merged.length / Math.max(1, sampleRate)
+    const startSec = recordStartSecRef.current
+    const endSec = Math.max(chartNowSecRef.current, startSec + audioDuration)
+    const duration = Math.max(0.001, audioDuration, endSec - startSec)
+    const clipPoints = pointsRef.current
+      .filter((point) => point.t >= startSec && point.t <= startSec + duration)
+      .map((point) => ({
+        ...point,
+        t: Math.max(0, point.t - startSec)
+      }))
+    pendingClipRef.current = {
+      id: nextClipIdRef.current,
+      audio: new Float32Array(merged),
+      sampleRate,
+      points: clipPoints,
+      duration
+    }
     setHasRecording(true)
+    setHasPendingClip(true)
     setStatus('Recording saved')
   }, [])
 
@@ -828,13 +1048,47 @@ export default function App(): JSX.Element {
 
   useEffect(() => {
     return () => {
+      stopSavedPlayback()
       stopListening()
       stopMetronome()
       stopAllNotes()
       wsRef.current?.close()
       void audioContextRef.current?.close()
     }
-  }, [stopAllNotes, stopListening, stopMetronome])
+  }, [stopAllNotes, stopListening, stopMetronome, stopSavedPlayback])
+
+  const renderSavedPanel = (slot: ClipSlot, clip: SavedClip | null): JSX.Element => {
+    const isActiveSlot = clipPlayback.slot === slot
+    const windowSeconds = Math.max(10, clip?.duration ?? 10)
+    const playLabel = isActiveSlot && clipPlayback.playing ? 'Pause' : isActiveSlot && clipPlayback.paused ? 'Resume' : 'Play'
+    return (
+      <section className="memory-panel" aria-label={`${clipSlotLabel(slot)} recording`}>
+        <header className="memory-panel-header">
+          <h2>{clipSlotLabel(slot)}</h2>
+          <div className="memory-actions">
+            <button type="button" className="btn" disabled={!clip} onClick={() => void replaySavedClip(slot)}>
+              Replay
+            </button>
+            <button type="button" className="btn" disabled={!clip} onClick={() => void toggleSavedClipPlayback(slot)}>
+              {playLabel}
+            </button>
+            {slot === 'current' ? (
+              <button type="button" className="btn promote" disabled={!clip} onClick={promoteCurrentToBest}>
+                Promote to Best
+              </button>
+            ) : null}
+          </div>
+        </header>
+        <PitchChart
+          points={clip?.points ?? []}
+          showCentCurve={true}
+          nowSec={clip?.duration ?? windowSeconds}
+          windowSeconds={windowSeconds}
+          showTimeAxis={false}
+        />
+      </section>
+    )
+  }
 
   return (
     <div className="app-shell">
@@ -958,6 +1212,10 @@ export default function App(): JSX.Element {
         <button type="button" className="btn" disabled={!hasRecording || playing} onClick={() => void playShifted()}>
           Play
         </button>
+
+        <button type="button" className="btn save-current" disabled={!hasPendingClip} onClick={saveToCurrent}>
+          Save to Current
+        </button>
       </section>
 
       <section className="status-row">
@@ -1005,6 +1263,11 @@ export default function App(): JSX.Element {
           nowSec={chartNowSec}
           onTogglePause={togglePauseFromChart}
         />
+      </section>
+
+      <section className="memory-grid">
+        {renderSavedPanel('best', bestClip)}
+        {renderSavedPanel('current', currentClip)}
       </section>
 
       <section className="touchpad-section">

@@ -14,6 +14,16 @@ Both are kept in this branch. Desktop behavior is not replaced by the web stack.
 - Web frontend source: `webapp/`
 - Docker deployment files: `Dockerfile`, `docker-compose.yml`, `deploy/`
 
+## Recording Comparison Workflow
+
+Tune Coach keeps practice recordings in memory only. After recording a phrase:
+
+- Use `Save to Current` to copy the latest recorded audio and pitch/cent curve into the Current panel.
+- The first saved Current recording also fills the Best panel automatically.
+- Current and Best can be replayed and paused independently for comparison.
+- Use `Promote to Best` when the Current take should replace the Best take.
+- Saving a new Current or promoting to Best replaces the previous clip in that slot.
+
 ## Prerequisites
 
 - Python `3.10+`

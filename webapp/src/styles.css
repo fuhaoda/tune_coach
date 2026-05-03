@@ -66,17 +66,75 @@ body {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 8px;
-  min-height: 504px;
+  height: clamp(400px, calc((100dvh - 260px) * 0.65), 640px);
+  min-height: 0;
   box-shadow: 0 8px 24px rgba(19, 31, 27, 0.08);
 }
 
 .pitch-chart {
   width: 100%;
-  min-height: 480px;
-  height: 480px;
+  min-height: 0;
+  height: 100%;
   border-radius: 8px;
   border: 1px solid #e3e8e2;
   cursor: pointer;
+}
+
+.memory-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.memory-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  box-shadow: 0 8px 22px rgba(19, 31, 27, 0.08);
+  min-width: 0;
+}
+
+.memory-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.memory-panel h2 {
+  margin: 0;
+  font-size: 1.35rem;
+  line-height: 1.1;
+}
+
+.memory-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.memory-actions .btn {
+  padding: 6px 10px;
+  font-size: 0.88rem;
+}
+
+.btn.save-current {
+  background: #d9f0e7;
+  border-color: #65a88e;
+}
+
+.btn.promote {
+  background: #e7def7;
+  border-color: #9071c2;
+}
+
+.memory-panel .pitch-chart {
+  min-height: 140px;
+  height: clamp(150px, calc((100dvh - 260px) * 0.27), 260px);
 }
 
 .status {
@@ -305,13 +363,18 @@ input {
     padding: 10px;
   }
 
+  .memory-grid {
+    grid-template-columns: 1fr;
+  }
+
   .chart-section {
-    min-height: 280px;
+    height: clamp(390px, 52dvh, 580px);
+    min-height: 0;
   }
 
   .pitch-chart {
-    min-height: 260px;
-    height: 260px;
+    min-height: 0;
+    height: 100%;
   }
 
   .status-meta {
